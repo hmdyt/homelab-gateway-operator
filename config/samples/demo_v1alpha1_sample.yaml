@@ -1,9 +1,0 @@
-apiVersion: demo.hmdyt.github.io/v1alpha1
-kind: Sample
-metadata:
-  labels:
-    app.kubernetes.io/name: homelab-gateway-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: sample-sample
-spec:
-  message: "hello world!!!!!!!!!!!!!"
