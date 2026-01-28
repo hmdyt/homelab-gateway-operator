@@ -1,0 +1,19 @@
+apiVersion: v2
+name: homelab-gateway-operator
+description: A Kubernetes operator for managing VPS gateway connections
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/hmdyt/homelab-gateway-operator
+sources:
+  - https://github.com/hmdyt/homelab-gateway-operator
+maintainers:
+  - name: hmdyt
+    url: https://github.com/hmdyt
+keywords:
+  - kubernetes
+  - operator
+  - gateway
+  - vps
+  - frp

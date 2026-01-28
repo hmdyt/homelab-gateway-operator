@@ -1,0 +1,323 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: vpsgateways.gateway.hmdyt.github.io
+spec:
+  group: gateway.hmdyt.github.io
+  names:
+    categories:
+    - gateway
+    kind: VPSGateway
+    listKind: VPSGatewayList
+    plural: vpsgateways
+    shortNames:
+    - vpsgw
+    singular: vpsgateway
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.frpcReady
+      name: FRPC Ready
+      type: boolean
+    - jsonPath: .spec.vps.address
+      name: VPS Address
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VPSGateway is the Schema for the vpsgateways API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VPSGatewaySpec defines the desired state of VPSGateway
+            properties:
+              egress:
+                description: Egress defines the egress proxy configuration for routing
+                  traffic from the VPS
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled controls whether egress proxy should be configured
+                    type: boolean
+                  noProxy:
+                    description: NoProxy is a list of hosts/domains that should bypass
+                      the proxy
+                    items:
+                      type: string
+                    type: array
+                  proxyPort:
+                    default: 3128
+                    description: ProxyPort is the port for the egress proxy
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                type: object
+              frp:
+                description: FRP defines the frp client configuration
+                properties:
+                  image:
+                    default: snowdreamtech/frpc:0.53.2
+                    description: Image is the frpc container image
+                    minLength: 1
+                    type: string
+                  port:
+                    default: 7000
+                    description: Port is the frp server port
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  tokenSecretRef:
+                    description: |-
+                      TokenSecretRef is a reference to a Secret containing the frp authentication token
+                      The secret must contain a key "token" by default
+                    properties:
+                      key:
+                        default: token
+                        description: Key in the secret (defaults to "token")
+                        type: string
+                      name:
+                        description: Name of the secret
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace of the secret (required for Cluster-scoped
+                          VPSGateway)
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
+                required:
+                - tokenSecretRef
+                type: object
+              ingress:
+                description: Ingress defines the ingress configuration for routing
+                  traffic to the VPS
+                properties:
+                  controller:
+                    description: Controller defines the Ingress Controller configuration
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled controls whether Traefik is managed by
+                          this operator
+                        type: boolean
+                      image:
+                        default: traefik:v3.2
+                        description: Image is the Traefik container image
+                        type: string
+                      replicas:
+                        default: 1
+                        description: Replicas is the number of Traefik replicas
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  dns:
+                    description: DNS defines the DNS configuration for external-dns
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled controls whether DNSEndpoint resources
+                          should be created
+                        type: boolean
+                      ttl:
+                        default: 300
+                        description: TTL is the DNS record TTL in seconds
+                        format: int64
+                        minimum: 60
+                        type: integer
+                    type: object
+                  enabled:
+                    default: true
+                    description: Enabled controls whether ingress resources should
+                      be created
+                    type: boolean
+                  ingressClassName:
+                    description: |-
+                      IngressClassName is the name of the IngressClass to create
+                      Defaults to vps-gateway-{VPSGateway name}
+                    minLength: 1
+                    type: string
+                  tls:
+                    description: TLS defines the TLS configuration for ingress
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled controls whether TLS should be enabled
+                          for ingress
+                        type: boolean
+                      issuer:
+                        default: letsencrypt-prod
+                        description: Issuer is the cert-manager Issuer name for generating
+                          TLS certificates
+                        minLength: 1
+                        type: string
+                    type: object
+                type: object
+              vps:
+                description: VPS defines the VPS server configuration
+                properties:
+                  address:
+                    description: |-
+                      Address is the IP address or hostname of the VPS
+                      Must be a valid hostname (RFC 1123) or IPv4 address
+                    minLength: 1
+                    pattern: ^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$|^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$
+                    type: string
+                required:
+                - address
+                type: object
+            required:
+            - frp
+            - vps
+            type: object
+          status:
+            description: VPSGatewayStatus defines the observed state of VPSGateway
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the VPSGateway's state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              egressProxyReady:
+                description: EgressProxyReady indicates whether the egress proxy is
+                  ready
+                type: boolean
+              frpcReady:
+                description: FRPCReady indicates whether the frpc deployment is ready
+                type: boolean
+              ingressControllerReady:
+                description: IngressControllerReady indicates whether the Traefik
+                  deployment is ready
+                type: boolean
+              lastSyncTime:
+                description: LastSyncTime is the last time the VPSGateway was successfully
+                  synced
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the generation observed by the
+                  controller
+                format: int64
+                type: integer
+              phase:
+                description: Phase represents the current phase of the VPSGateway
+                enum:
+                - Pending
+                - Ready
+                - Error
+                type: string
+              watchedIngresses:
+                description: WatchedIngresses is the list of Ingresses currently watched
+                  by this VPSGateway
+                items:
+                  description: WatchedIngress represents an Ingress being watched
+                    by the VPSGateway
+                  properties:
+                    domains:
+                      description: Domains extracted from the Ingress rules
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: Name of the Ingress
+                      type: string
+                    namespace:
+                      description: Namespace of the Ingress
+                      type: string
+                  required:
+                  - name
+                  - namespace
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
