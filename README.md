@@ -46,8 +46,7 @@ flowchart LR
 ## インストール
 
 ```bash
-helm repo add homelab-gateway-operator https://hmdyt.github.io/homelab-gateway-operator
-helm install homelab-gateway-operator homelab-gateway-operator/homelab-gateway-operator
+helm install homelab-gateway-operator oci://ghcr.io/hmdyt/homelab-gateway-operator
 ```
 
 ## 使い方

@@ -9,13 +9,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
+  contents: read
+  packages: write
 
 jobs:
   release:
@@ -23,50 +18,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
           version: v3.14.0
 
-      - name: Install chart-releaser
-        uses: helm/chart-releaser-action@v1.6.0
-        with:
-          install_only: "true"
-        env:
-          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Package charts
+      - name: Package and push chart
         run: |
-          cr package charts/homelab-gateway-operator
-
-      - name: Upload charts to GitHub Releases
-        run: |
-          cr upload --owner ${{ github.repository_owner }} --git-repo ${{ github.event.repository.name }} --skip-existing
-        env:
-          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate index.yaml
-        run: |
-          mkdir -p .cr-index
-          cr index --owner ${{ github.repository_owner }} --git-repo ${{ github.event.repository.name }} --index-path .cr-index/index.yaml
-        env:
-          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: .cr-index
-
-  deploy:
-    needs: release
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
-        id: deployment
+          helm package charts/homelab-gateway-operator
+          helm push homelab-gateway-operator-*.tgz oci://ghcr.io/${{ github.repository_owner }}
