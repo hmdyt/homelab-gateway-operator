@@ -1,195 +1,159 @@
-# homelab-gateway-operator
+# Homelab Gateway Operator
 
-Kubernetes Operator for managing VPS Gateway with frp (Fast Reverse Proxy) for homelab environments.
+Kubernetes Operator で VPS ゲートウェイ接続を管理し、ホームラボ環境から外部へのトラフィックルーティングを自動化します。
 
 ## 概要
 
-このオペレーターは、グローバル IP を持たないホームラボ Kubernetes クラスタが VPS を経由してインターネットと通信するための frp クライアントを自動管理します。
+Homelab Gateway Operator は、Kubernetes クラスタと リモート VPS 間のブリッジを構築します。frp (fast reverse proxy) を使用したリバースプロキシトンネリング、Traefik による Ingress Controller 管理、cert-manager/external-dns との連携による TLS 証明書・DNS レコードの自動管理を提供します。
 
-### 主な機能
+```mermaid
+flowchart LR
+    subgraph Internet
+        User[ユーザー]
+    end
 
-- **VPSGateway CRD**: VPS と frp の設定を宣言的に管理
-- **自動リソース生成**: frpc ConfigMap, Deployment, Service を自動作成
-- **Ingress サポート**: Traefik などの Ingress Controller への自動ルーティング
-- **Egress サポート**: VPS 経由の Egress プロキシ設定
+    subgraph VPS
+        FRPS[frp server]
+    end
 
-## クイックスタート
+    subgraph Kubernetes
+        FRPC[frp client]
+        Traefik[Traefik Ingress Controller]
+        App[アプリケーション Pod]
+    end
 
-### 前提条件
-
-- Go version v1.24.6+
-- Kubernetes v1.11.3+ クラスタ
-- kubectl version v1.11.3+
-- VPS with frps (frp server) running
-
-### インストール
-
-1. **CRD をインストール**
-
-```sh
-make install
+    User -->|HTTPS| FRPS
+    FRPS <-->|frp tunnel| FRPC
+    FRPC --> Traefik
+    Traefik --> App
 ```
 
-2. **Operator をローカル実行（開発用）**
+## 機能
 
-```sh
-make run
+- **VPS ゲートウェイ管理**: frp クライアントのデプロイと設定を自動化
+- **Ingress Controller 管理**: Traefik の自動デプロイ・設定
+- **TLS 自動化**: cert-manager と連携した証明書の自動発行
+- **DNS 自動化**: external-dns と連携した DNS レコードの自動管理
+- **Egress プロキシ** (オプション): アウトバウンドトラフィックのプロキシ
+
+## 前提条件
+
+- Kubernetes >= 1.25
+- VPS サーバー上で動作する frp サーバー (frps)
+- cert-manager (TLS を使用する場合)
+- external-dns (DNS 自動管理を使用する場合)
+
+## インストール
+
+```bash
+helm repo add homelab-gateway-operator https://hmdyt.github.io/homelab-gateway-operator
+helm install homelab-gateway-operator homelab-gateway-operator/homelab-gateway-operator
 ```
 
-または
+## 使い方
 
-3. **Operator をクラスタにデプロイ**
+### 1. frp トークン用の Secret を作成
 
-```sh
-# イメージをビルドしてプッシュ
-make docker-build docker-push IMG=<your-registry>/homelab-gateway-operator:tag
-
-# デプロイ
-make deploy IMG=<your-registry>/homelab-gateway-operator:tag
+```bash
+kubectl create secret generic frp-token \
+  --namespace=vps-gateway-system \
+  --from-literal=token=YOUR_FRP_TOKEN
 ```
 
-### 使用方法
-
-1. **frp 認証トークン用の Secret を作成**
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: frp-token
-type: Opaque
-stringData:
-  token: "your-frp-server-token"
-```
-
-```sh
-kubectl apply -f config/samples/secret_frp-token.yaml
-```
-
-2. **VPSGateway リソースを作成**
+### 2. VPSGateway リソースを作成
 
 ```yaml
 apiVersion: gateway.hmdyt.github.io/v1alpha1
 kind: VPSGateway
 metadata:
-  name: my-gateway
+  name: main
 spec:
   vps:
-    address: "203.0.113.1"  # あなたの VPS の IP アドレス
+    address: "your-vps-ip-or-hostname"
 
   frp:
     port: 7000
     tokenSecretRef:
       name: frp-token
+      namespace: vps-gateway-system
 
   ingress:
     enabled: true
-    domains:
-      - "*.example.com"
-
-  egress:
-    enabled: false  # 必要に応じて true に
+    controller:
+      enabled: true
+    tls:
+      enabled: true
+      issuer: "letsencrypt-prod"
+    dns:
+      enabled: true
 ```
 
-```sh
-kubectl apply -f config/samples/gateway_v1alpha1_vpsgateway.yaml
+### 3. Ingress を作成してアプリケーションを公開
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+  namespace: default
+spec:
+  ingressClassName: vps-gateway-main  # vps-gateway-{VPSGateway名}
+  rules:
+    - host: myapp.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port:
+                  number: 80
 ```
 
-3. **状態を確認**
+Operator が自動的に以下を実行します:
+- DNS レコードの作成 (DNSEndpoint)
+- TLS 証明書の発行 (Certificate)
+- frp 設定の更新
 
-```sh
-kubectl get vpsgw
-kubectl describe vpsgw my-gateway
-```
-
-### 生成されるリソース
-
-VPSGateway を作成すると、以下のリソースが自動的に生成されます:
-
-- **ConfigMap** (`frpc-config-<name>`): frp クライアント設定 (TOML)
-- **Deployment** (`frpc-<name>`): frpc コンテナを実行
-- **Service** (`egress-proxy-<name>`): Egress が有効な場合のみ
-
-すべてのリソースには OwnerReference が設定されており、VPSGateway を削除すると自動的にクリーンアップされます。
-
-## 設定オプション
+## 設定リファレンス
 
 ### VPSGateway Spec
 
-```yaml
-spec:
-  vps:
-    address: string          # 必須: VPS の IP アドレスまたはホスト名
-    namespace: string        # オプション: リソースを作成する namespace (デフォルト: CR と同じ)
-
-  frp:
-    port: int32             # オプション: frp サーバーポート (デフォルト: 7000)
-    tokenSecretRef:
-      name: string          # 必須: トークンを含む Secret の名前
-      key: string           # オプション: Secret 内のキー (デフォルト: "token")
-    image: string           # オプション: frpc イメージ (デフォルト: "snowdreamtech/frpc:0.53.2")
-
-  ingress:
-    enabled: bool           # オプション: Ingress を有効化 (デフォルト: true)
-    domains: []string       # 必須 (enabled が true の場合): ルーティングするドメインリスト
-    ingressClassName: string # オプション: IngressClass 名 (デフォルト: "traefik")
-    tls:
-      enabled: bool         # オプション: TLS を有効化 (デフォルト: true)
-      issuer: string        # オプション: cert-manager Issuer 名 (デフォルト: "letsencrypt-prod")
-
-  egress:
-    enabled: bool           # オプション: Egress プロキシを有効化 (デフォルト: false)
-    proxyPort: int32        # オプション: プロキシポート (デフォルト: 3128)
-    noProxy: []string       # オプション: プロキシをバイパスするホストリスト
-```
-
-### VPSGateway Status
-
-```yaml
-status:
-  phase: string                 # Pending | Ready | Error
-  frpcReady: bool               # frpc Deployment の準備状態
-  egressProxyReady: bool        # Egress Service の準備状態
-  lastSyncTime: timestamp       # 最後の同期時刻
-  observedGeneration: int64     # 観測された世代番号
-  conditions: []Condition       # 詳細な状態情報
-```
+| フィールド | 説明 | デフォルト |
+|-----------|------|-----------|
+| `vps.address` | VPS の IP アドレスまたはホスト名 | (必須) |
+| `frp.port` | frp サーバーポート | `7000` |
+| `frp.tokenSecretRef` | 認証トークンの Secret 参照 | (必須) |
+| `frp.image` | frpc コンテナイメージ | `snowdreamtech/frpc:0.53.2` |
+| `ingress.enabled` | Ingress 機能の有効化 | `true` |
+| `ingress.ingressClassName` | IngressClass 名 | `vps-gateway-{name}` |
+| `ingress.controller.enabled` | Traefik 管理の有効化 | `true` |
+| `ingress.controller.image` | Traefik イメージ | `traefik:v3.2` |
+| `ingress.controller.replicas` | Traefik レプリカ数 | `1` |
+| `ingress.tls.enabled` | TLS の有効化 | `true` |
+| `ingress.tls.issuer` | cert-manager ClusterIssuer 名 | `letsencrypt-prod` |
+| `ingress.dns.enabled` | DNSEndpoint 作成の有効化 | `true` |
+| `ingress.dns.ttl` | DNS レコード TTL (秒) | `300` |
+| `egress.enabled` | Egress プロキシの有効化 | `false` |
+| `egress.proxyPort` | プロキシポート | `3128` |
+| `egress.noProxy` | プロキシをバイパスするホスト | `[]` |
 
 ## 開発
 
-### テスト
+開発環境には Nix を使用しています。
 
-```sh
+```bash
+# ビルド
+nix develop -c go build ./...
+
 # ユニットテスト
-make test
+nix develop -c make test
 
 # E2E テスト
-make test-e2e
+nix develop -c make e2e-test
+
+# コード生成
+nix develop -c make generate
+nix develop -c make manifests
 ```
-
-### Lint
-
-```sh
-make lint
-```
-
-### コード生成
-
-```sh
-# DeepCopy メソッドを生成
-make generate
-
-# CRD マニフェストを生成
-make manifests
-```
-
-## アンインストール
-
-```sh
-# CRD を削除
-make uninstall
-
-# Operator をアンデプロイ
-make undeploy
-```
-
