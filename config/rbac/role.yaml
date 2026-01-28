@@ -45,6 +45,30 @@ rules:
   - update
   - watch
 - apiGroups:
+  - cert-manager.io
+  resources:
+  - certificates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - externaldns.k8s.io
+  resources:
+  - dnsendpoints
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - gateway.hmdyt.github.io
   resources:
   - vpsgateways
@@ -73,7 +97,7 @@ rules:
 - apiGroups:
   - networking.k8s.io
   resources:
-  - ingresses
+  - ingressclasses
   verbs:
   - create
   - delete
@@ -81,4 +105,12 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
   - watch

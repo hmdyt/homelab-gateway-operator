@@ -81,6 +81,11 @@ type SecretReference struct {
 	// +optional
 	// +kubebuilder:default="token"
 	Key string `json:"key,omitempty"`
+
+	// Namespace of the secret (required for Cluster-scoped VPSGateway)
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Namespace string `json:"namespace"`
 }
 
 // IngressConfig defines the ingress configuration
@@ -88,23 +93,35 @@ type IngressConfig struct {
 	// Enabled controls whether ingress resources should be created
 	// +optional
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 
-	// Domains is the list of domains to route to the VPS
-	// Required when Enabled is true
+	// IngressClassName is the name of the IngressClass to create
+	// Defaults to vps-gateway-{VPSGateway name}
 	// +optional
-	// +kubebuilder:validation:MinItems=1
-	Domains []string `json:"domains,omitempty"`
-
-	// IngressClassName is the name of the IngressClass to use
-	// +optional
-	// +kubebuilder:default="traefik"
 	// +kubebuilder:validation:MinLength=1
 	IngressClassName string `json:"ingressClassName,omitempty"`
 
 	// TLS defines the TLS configuration for ingress
 	// +optional
 	TLS IngressTLSConfig `json:"tls,omitempty"`
+
+	// DNS defines the DNS configuration for external-dns
+	// +optional
+	DNS DNSConfig `json:"dns,omitempty"`
+}
+
+// DNSConfig defines the DNS configuration for external-dns integration
+type DNSConfig struct {
+	// Enabled controls whether DNSEndpoint resources should be created
+	// +optional
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled"`
+
+	// TTL is the DNS record TTL in seconds
+	// +optional
+	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=60
+	TTL int64 `json:"ttl,omitempty"`
 }
 
 // IngressTLSConfig defines the TLS configuration for ingress
@@ -112,7 +129,7 @@ type IngressTLSConfig struct {
 	// Enabled controls whether TLS should be enabled for ingress
 	// +optional
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 
 	// Issuer is the cert-manager Issuer name for generating TLS certificates
 	// +optional
@@ -126,7 +143,7 @@ type EgressConfig struct {
 	// Enabled controls whether egress proxy should be configured
 	// +optional
 	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 
 	// ProxyPort is the port for the egress proxy
 	// +optional
@@ -182,6 +199,22 @@ type VPSGatewayStatus struct {
 	// ObservedGeneration is the generation observed by the controller
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// WatchedIngresses is the list of Ingresses currently watched by this VPSGateway
+	// +optional
+	WatchedIngresses []WatchedIngress `json:"watchedIngresses,omitempty"`
+}
+
+// WatchedIngress represents an Ingress being watched by the VPSGateway
+type WatchedIngress struct {
+	// Namespace of the Ingress
+	Namespace string `json:"namespace"`
+
+	// Name of the Ingress
+	Name string `json:"name"`
+
+	// Domains extracted from the Ingress rules
+	Domains []string `json:"domains,omitempty"`
 }
 
 // Condition types for VPSGateway
@@ -194,6 +227,8 @@ const (
 	ConditionTypeEgressProxyReady = "EgressProxyReady"
 	// ConditionTypeSecretFound indicates the token secret was found
 	ConditionTypeSecretFound = "SecretFound"
+	// ConditionTypeIngressClassReady indicates the IngressClass is ready
+	ConditionTypeIngressClassReady = "IngressClassReady"
 )
 
 // Condition reasons
@@ -214,12 +249,11 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=vpsgw,categories=gateway
+// +kubebuilder:resource:scope=Cluster,shortName=vpsgw,categories=gateway
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="FRPC Ready",type=boolean,JSONPath=`.status.frpcReady`
 // +kubebuilder:printcolumn:name="VPS Address",type=string,JSONPath=`.spec.vps.address`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.ingress) || !has(self.spec.ingress.enabled) || self.spec.ingress.enabled == false || (has(self.spec.ingress.domains) && size(self.spec.ingress.domains) > 0)",message="domains must be specified when ingress is enabled"
 
 // VPSGateway is the Schema for the vpsgateways API
 type VPSGateway struct {

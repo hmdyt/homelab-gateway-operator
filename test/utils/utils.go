@@ -173,6 +173,31 @@ func GetProjectDir() (string, error) {
 	return wd, nil
 }
 
+// ExternalDNSCRDURL is the URL for the external-dns DNSEndpoint CRD
+const externalDNSCRDURL = "https://raw.githubusercontent.com/kubernetes-sigs/external-dns/master/config/crd/standard/dnsendpoints.externaldns.k8s.io.yaml"
+
+// InstallExternalDNSCRD installs the external-dns DNSEndpoint CRD
+func InstallExternalDNSCRD() error {
+	cmd := exec.Command("kubectl", "apply", "-f", externalDNSCRDURL)
+	_, err := Run(cmd)
+	return err
+}
+
+// UninstallExternalDNSCRD uninstalls the external-dns DNSEndpoint CRD
+func UninstallExternalDNSCRD() {
+	cmd := exec.Command("kubectl", "delete", "-f", externalDNSCRDURL, "--ignore-not-found")
+	if _, err := Run(cmd); err != nil {
+		warnError(err)
+	}
+}
+
+// IsExternalDNSCRDInstalled checks if the DNSEndpoint CRD is installed
+func IsExternalDNSCRDInstalled() bool {
+	cmd := exec.Command("kubectl", "get", "crd", "dnsendpoints.externaldns.k8s.io")
+	_, err := Run(cmd)
+	return err == nil
+}
+
 // UncommentCode searches for target in the file and remove the comment prefix
 // of the target content. The target content may span multiple lines.
 func UncommentCode(filename, target, prefix string) error {

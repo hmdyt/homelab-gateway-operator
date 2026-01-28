@@ -1,0 +1,53 @@
+# Example Ingress that uses the vps-gateway IngressClass
+# This Ingress will be watched by the operator, which will:
+# 1. Create a DNSEndpoint CR for external-dns to manage DNS records
+# 2. Create a Certificate CR for cert-manager to manage TLS certificates
+# 3. Update the frpc ConfigMap to include this domain
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+  namespace: default
+spec:
+  ingressClassName: vps-gateway-main  # Must match: vps-gateway-{VPSGateway name}
+  rules:
+    - host: myapp.example.com  # Replace with your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port:
+                  number: 80
+---
+# Another example with multiple hosts
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: multi-host-app
+  namespace: default
+spec:
+  ingressClassName: vps-gateway-main
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8080
+    - host: web.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web-service
+                port:
+                  number: 3000

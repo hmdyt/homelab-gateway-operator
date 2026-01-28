@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,15 +49,20 @@ const (
 	requeueAfterSuccess = 10 * time.Minute
 
 	// Event reasons
-	EventReasonConfigMapCreated  = "ConfigMapCreated"
-	EventReasonConfigMapUpdated  = "ConfigMapUpdated"
-	EventReasonDeploymentCreated = "DeploymentCreated"
-	EventReasonDeploymentUpdated = "DeploymentUpdated"
-	EventReasonServiceCreated    = "ServiceCreated"
-	EventReasonServiceUpdated    = "ServiceUpdated"
-	EventReasonSecretNotFound    = "SecretNotFound"
-	EventReasonReconcileError    = "ReconcileError"
-	EventReasonReconcileSuccess  = "ReconcileSuccess"
+	EventReasonConfigMapCreated    = "ConfigMapCreated"
+	EventReasonConfigMapUpdated    = "ConfigMapUpdated"
+	EventReasonDeploymentCreated   = "DeploymentCreated"
+	EventReasonDeploymentUpdated   = "DeploymentUpdated"
+	EventReasonServiceCreated      = "ServiceCreated"
+	EventReasonServiceUpdated      = "ServiceUpdated"
+	EventReasonSecretNotFound      = "SecretNotFound"
+	EventReasonReconcileError      = "ReconcileError"
+	EventReasonReconcileSuccess    = "ReconcileSuccess"
+	EventReasonIngressClassCreated = "IngressClassCreated"
+	EventReasonIngressClassUpdated = "IngressClassUpdated"
+
+	// Default namespace for frpc deployment when not specified
+	defaultFrpcNamespace = "vps-gateway-system"
 )
 
 // VPSGatewayReconciler reconciles a VPSGateway object
@@ -75,15 +79,16 @@ type VPSGatewayReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile implements the main reconciliation logic
 func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Starting reconciliation", "namespace", req.Namespace, "name", req.Name)
+	logger.Info("Starting reconciliation", "name", req.Name)
 
-	// 1. Fetch VPSGateway resource
+	// 1. Fetch VPSGateway resource (Cluster-scoped, no namespace)
 	gateway := &gatewayv1alpha1.VPSGateway{}
 	if err := r.Get(ctx, req.NamespacedName, gateway); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -95,7 +100,7 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// 2. Handle deletion with finalizer
-	if !gateway.ObjectMeta.DeletionTimestamp.IsZero() {
+	if !gateway.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, gateway)
 	}
 
@@ -123,7 +128,7 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			notFoundErr := fmt.Errorf("secret %s not found in namespace %s",
-				gateway.Spec.FRP.TokenSecretRef.Name, gateway.Namespace)
+				gateway.Spec.FRP.TokenSecretRef.Name, gateway.Spec.FRP.TokenSecretRef.Namespace)
 			r.Recorder.Event(gateway, corev1.EventTypeWarning, EventReasonSecretNotFound, notFoundErr.Error())
 			return r.handleReconcileError(ctx, gateway, gatewayv1alpha1.ReasonSecretNotFound, notFoundErr)
 		}
@@ -139,12 +144,35 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	r.setCondition(gateway, gatewayv1alpha1.ConditionTypeSecretFound, metav1.ConditionTrue,
 		"SecretFound", "Token secret found and accessible")
 
-	// 6. Reconcile ConfigMap
+	// 6. Reconcile IngressClass (if ingress is enabled)
+	if gateway.Spec.Ingress.Enabled {
+		if err := r.reconcileIngressClass(ctx, gateway); err != nil {
+			return r.handleReconcileError(ctx, gateway, "IngressClassFailed", err)
+		}
+		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressClassReady, metav1.ConditionTrue,
+			gatewayv1alpha1.ReasonAvailable, "IngressClass created and up-to-date")
+	} else {
+		// Clean up IngressClass if disabled
+		if err := r.deleteIngressClassIfExists(ctx, gateway); err != nil {
+			logger.Error(err, "Failed to delete IngressClass")
+		}
+		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressClassReady, metav1.ConditionFalse,
+			"IngressDisabled", "Ingress is disabled")
+	}
+
+	// 7. Collect domains from Ingresses and update status
+	watchedIngresses, err := r.collectWatchedIngresses(ctx, gateway)
+	if err != nil {
+		logger.Error(err, "Failed to collect watched Ingresses")
+	}
+	gateway.Status.WatchedIngresses = watchedIngresses
+
+	// 8. Reconcile ConfigMap (with domains from Ingresses)
 	if err := r.reconcileConfigMap(ctx, gateway); err != nil {
 		return r.handleReconcileError(ctx, gateway, "ConfigMapFailed", err)
 	}
 
-	// 7. Reconcile Deployment
+	// 9. Reconcile Deployment
 	if err := r.reconcileDeployment(ctx, gateway); err != nil {
 		return r.handleReconcileError(ctx, gateway, "DeploymentFailed", err)
 	}
@@ -168,23 +196,7 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// 8. Reconcile Ingress (if enabled)
-	if gateway.Spec.Ingress.Enabled && len(gateway.Spec.Ingress.Domains) > 0 {
-		if err := r.reconcileIngress(ctx, gateway); err != nil {
-			return r.handleReconcileError(ctx, gateway, "IngressFailed", err)
-		}
-		r.setCondition(gateway, "IngressReady", metav1.ConditionTrue,
-			gatewayv1alpha1.ReasonAvailable, "Ingress resources created and up-to-date")
-	} else {
-		// Clean up ingress if disabled
-		if err := r.deleteIngressIfExists(ctx, gateway); err != nil {
-			logger.Error(err, "Failed to delete ingress")
-		}
-		r.setCondition(gateway, "IngressReady", metav1.ConditionFalse,
-			"IngressDisabled", "Ingress is disabled or no domains configured")
-	}
-
-	// 9. Reconcile Service (if egress is enabled)
+	// 10. Reconcile Service (if egress is enabled)
 	if gateway.Spec.Egress.Enabled {
 		if err := r.reconcileService(ctx, gateway); err != nil {
 			return r.handleReconcileError(ctx, gateway, "ServiceFailed", err)
@@ -202,7 +214,7 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			gatewayv1alpha1.ReasonEgressDisabled, "Egress is disabled")
 	}
 
-	// 10. Update final status to Ready
+	// 11. Update final status to Ready
 	gateway.Status.Phase = gatewayv1alpha1.VPSGatewayPhaseReady
 	now := metav1.Now()
 	gateway.Status.LastSyncTime = &now
@@ -274,13 +286,14 @@ func (r *VPSGatewayReconciler) setCondition(gateway *gatewayv1alpha1.VPSGateway,
 func (r *VPSGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1alpha1.VPSGateway{}).
-		Owns(&corev1.ConfigMap{}).
-		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.Service{}).
-		Owns(&networkingv1.Ingress{}).
+		Owns(&networkingv1.IngressClass{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findGatewaysForSecret),
+		).
+		Watches(
+			&networkingv1.Ingress{},
+			handler.EnqueueRequestsFromMapFunc(r.findGatewaysForIngress),
 		).
 		Complete(r)
 }
@@ -295,23 +308,100 @@ func (r *VPSGatewayReconciler) findGatewaysForSecret(ctx context.Context, obj cl
 		return []reconcile.Request{}
 	}
 
-	// List all VPSGateways in the same namespace
+	// List all VPSGateways (Cluster-scoped)
 	gatewayList := &gatewayv1alpha1.VPSGatewayList{}
-	if err := r.List(ctx, gatewayList, client.InNamespace(secret.Namespace)); err != nil {
+	if err := r.List(ctx, gatewayList); err != nil {
 		return []reconcile.Request{}
 	}
 
 	var requests []reconcile.Request
 	for _, gateway := range gatewayList.Items {
-		if gateway.Spec.FRP.TokenSecretRef.Name == secret.Name {
+		// Check if this Secret matches the VPSGateway's TokenSecretRef
+		if gateway.Spec.FRP.TokenSecretRef.Name == secret.Name &&
+			gateway.Spec.FRP.TokenSecretRef.Namespace == secret.Namespace {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: types.NamespacedName{
-					Name:      gateway.Name,
-					Namespace: gateway.Namespace,
+					Name: gateway.Name,
 				},
 			})
 		}
 	}
 
 	return requests
+}
+
+// findGatewaysForIngress maps Ingress changes to VPSGateway reconcile requests
+func (r *VPSGatewayReconciler) findGatewaysForIngress(ctx context.Context, obj client.Object) []reconcile.Request {
+	logger := log.FromContext(ctx)
+
+	ingress, ok := obj.(*networkingv1.Ingress)
+	if !ok {
+		logger.Error(nil, "Expected Ingress object", "type", fmt.Sprintf("%T", obj))
+		return []reconcile.Request{}
+	}
+
+	// Check if the Ingress has a vps-gateway IngressClass
+	if ingress.Spec.IngressClassName == nil {
+		return []reconcile.Request{}
+	}
+
+	ingressClassName := *ingress.Spec.IngressClassName
+	if len(ingressClassName) <= len(IngressClassPrefix) {
+		return []reconcile.Request{}
+	}
+
+	// Extract VPSGateway name from IngressClass name
+	if ingressClassName[:len(IngressClassPrefix)] != IngressClassPrefix {
+		return []reconcile.Request{}
+	}
+
+	vpsGatewayName := ingressClassName[len(IngressClassPrefix):]
+
+	logger.V(1).Info("Ingress changed, triggering VPSGateway reconciliation",
+		"ingress", ingress.Name, "namespace", ingress.Namespace, "vpsGateway", vpsGatewayName)
+
+	return []reconcile.Request{
+		{
+			NamespacedName: types.NamespacedName{
+				Name: vpsGatewayName,
+			},
+		},
+	}
+}
+
+// collectWatchedIngresses collects all Ingresses using this VPSGateway's IngressClass
+func (r *VPSGatewayReconciler) collectWatchedIngresses(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) ([]gatewayv1alpha1.WatchedIngress, error) {
+	ingressClassName := getIngressClassName(gateway)
+
+	// List all Ingresses
+	ingressList := &networkingv1.IngressList{}
+	if err := r.List(ctx, ingressList); err != nil {
+		return nil, err
+	}
+
+	watchedIngresses := make([]gatewayv1alpha1.WatchedIngress, 0, len(ingressList.Items))
+	for _, ingress := range ingressList.Items {
+		if ingress.Spec.IngressClassName == nil {
+			continue
+		}
+		if *ingress.Spec.IngressClassName != ingressClassName {
+			continue
+		}
+
+		// Extract domains from Ingress rules
+		var domains []string
+		for _, rule := range ingress.Spec.Rules {
+			if rule.Host != "" {
+				domains = append(domains, rule.Host)
+			}
+		}
+
+		watchedIngresses = append(watchedIngresses, gatewayv1alpha1.WatchedIngress{
+			Namespace: ingress.Namespace,
+			Name:      ingress.Name,
+			Domains:   domains,
+		})
+	}
+
+	return watchedIngresses, nil
 }

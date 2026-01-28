@@ -34,11 +34,15 @@ import (
 var (
 	// Optional Environment Variables:
 	// - CERT_MANAGER_INSTALL_SKIP=true: Skips CertManager installation during test setup.
-	// These variables are useful if CertManager is already installed, avoiding
+	// - EXTERNAL_DNS_CRD_INSTALL_SKIP=true: Skips external-dns CRD installation during test setup.
+	// These variables are useful if these components are already installed, avoiding
 	// re-installation and conflicts.
-	skipCertManagerInstall = os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true"
+	skipCertManagerInstall    = os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true"
+	skipExternalDNSCRDInstall = os.Getenv("EXTERNAL_DNS_CRD_INSTALL_SKIP") == "true"
 	// isCertManagerAlreadyInstalled will be set true when CertManager CRDs be found on the cluster
 	isCertManagerAlreadyInstalled = false
+	// isExternalDNSCRDAlreadyInstalled will be set true when external-dns CRD is found on the cluster
+	isExternalDNSCRDAlreadyInstalled = false
 
 	// projectImage is the name of the image which will be build and loaded
 	// with the code source changes to be tested.
@@ -81,9 +85,27 @@ var _ = BeforeSuite(func() {
 			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: CertManager is already installed. Skipping installation...\n")
 		}
 	}
+
+	// Setup external-dns CRD before the suite if not skipped and if not already installed
+	if !skipExternalDNSCRDInstall {
+		By("checking if external-dns CRD is installed already")
+		isExternalDNSCRDAlreadyInstalled = utils.IsExternalDNSCRDInstalled()
+		if !isExternalDNSCRDAlreadyInstalled {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Installing external-dns CRD...\n")
+			Expect(utils.InstallExternalDNSCRD()).To(Succeed(), "Failed to install external-dns CRD")
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: external-dns CRD is already installed. Skipping installation...\n")
+		}
+	}
 })
 
 var _ = AfterSuite(func() {
+	// Teardown external-dns CRD after the suite if not skipped and if it was not already installed
+	if !skipExternalDNSCRDInstall && !isExternalDNSCRDAlreadyInstalled {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling external-dns CRD...\n")
+		utils.UninstallExternalDNSCRD()
+	}
+
 	// Teardown CertManager after the suite if not skipped and if it was not already installed
 	if !skipCertManagerInstall && !isCertManagerAlreadyInstalled {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling CertManager...\n")

@@ -4,7 +4,7 @@ metadata:
   labels:
     app.kubernetes.io/name: homelab-gateway-operator
     app.kubernetes.io/managed-by: kustomize
-  name: vpsgateway-sample
+  name: main  # Cluster-scoped, no namespace
 spec:
   vps:
     address: "203.0.113.1"  # Replace with your VPS IP address (RFC 5737 TEST-NET-3)
@@ -14,17 +14,18 @@ spec:
     tokenSecretRef:
       name: frp-token
       key: token  # Optional: defaults to "token"
+      namespace: vps-gateway-system  # Required: namespace where the secret is located
     image: "snowdreamtech/frpc:0.53.2"  # Optional: uses default if not specified
 
   ingress:
     enabled: true
-    domains:
-      - "*.example.com"  # Replace with your domain
-      - "app.example.com"
-    ingressClassName: "traefik"  # Optional: defaults to "traefik"
+    # ingressClassName: "vps-gateway-main"  # Optional: defaults to "vps-gateway-{name}"
     tls:
       enabled: true  # Optional: defaults to true
       issuer: "letsencrypt-prod"  # Optional: defaults to "letsencrypt-prod"
+    dns:
+      enabled: true  # Optional: defaults to true (creates DNSEndpoint CRs for external-dns)
+      ttl: 300  # Optional: DNS record TTL in seconds, defaults to 300
 
   egress:
     enabled: true  # Optional: defaults to false

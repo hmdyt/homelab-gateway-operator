@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -70,12 +71,17 @@ func (r *VPSGatewayReconciler) getServiceName(gateway *gatewayv1alpha1.VPSGatewa
 	return fmt.Sprintf("egress-proxy-%s", gateway.Name)
 }
 
-func (r *VPSGatewayReconciler) getIngressName(gateway *gatewayv1alpha1.VPSGateway) string {
-	return fmt.Sprintf("ingress-%s", gateway.Name)
+func (r *VPSGatewayReconciler) getIngressClassName(gateway *gatewayv1alpha1.VPSGateway) string {
+	return getIngressClassName(gateway)
 }
 
-func (r *VPSGatewayReconciler) getFrpcServiceName(gateway *gatewayv1alpha1.VPSGateway) string {
-	return fmt.Sprintf("frpc-svc-%s", gateway.Name)
+// getResourceNamespace returns the namespace for deploying frpc resources
+func (r *VPSGatewayReconciler) getResourceNamespace(gateway *gatewayv1alpha1.VPSGateway) string {
+	// Use the namespace from the Secret reference
+	if gateway.Spec.FRP.TokenSecretRef.Namespace != "" {
+		return gateway.Spec.FRP.TokenSecretRef.Namespace
+	}
+	return defaultFrpcNamespace
 }
 
 // SecurityContext helpers
@@ -108,10 +114,11 @@ func getPodSecurityContext() *corev1.PodSecurityContext {
 func (r *VPSGatewayReconciler) reconcileConfigMap(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
 	logger := log.FromContext(ctx)
 
+	namespace := r.getResourceNamespace(gateway)
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      r.getConfigMapName(gateway),
-			Namespace: gateway.Namespace,
+			Namespace: namespace,
 		},
 	}
 
@@ -131,8 +138,9 @@ func (r *VPSGatewayReconciler) reconcileConfigMap(ctx context.Context, gateway *
 		// Set labels
 		configMap.Labels = r.getCommonLabels(gateway)
 
-		// Set owner reference for garbage collection
-		return controllerutil.SetControllerReference(gateway, configMap, r.Scheme)
+		// Note: Cannot set OwnerReference for cluster-scoped owner to namespace-scoped resource
+		// The ConfigMap will be cleaned up via finalizer instead
+		return nil
 	})
 
 	if err != nil {
@@ -140,14 +148,15 @@ func (r *VPSGatewayReconciler) reconcileConfigMap(ctx context.Context, gateway *
 		return err
 	}
 
-	if op == controllerutil.OperationResultCreated {
+	switch op {
+	case controllerutil.OperationResultCreated:
 		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonConfigMapCreated,
-			fmt.Sprintf("ConfigMap %s created", configMap.Name))
-		logger.Info("ConfigMap created", "name", configMap.Name)
-	} else if op == controllerutil.OperationResultUpdated {
+			fmt.Sprintf("ConfigMap %s/%s created", namespace, configMap.Name))
+		logger.Info("ConfigMap created", "name", configMap.Name, "namespace", namespace)
+	case controllerutil.OperationResultUpdated:
 		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonConfigMapUpdated,
-			fmt.Sprintf("ConfigMap %s updated", configMap.Name))
-		logger.Info("ConfigMap updated", "name", configMap.Name)
+			fmt.Sprintf("ConfigMap %s/%s updated", namespace, configMap.Name))
+		logger.Info("ConfigMap updated", "name", configMap.Name, "namespace", namespace)
 	}
 
 	return nil
@@ -169,15 +178,18 @@ func (r *VPSGatewayReconciler) generateFrpcConfig(ctx context.Context, gateway *
 	builder.WriteString("[auth]\n")
 	builder.WriteString(fmt.Sprintf("token = \"%s\"\n\n", token))
 
-	// Ingress proxies (if enabled)
-	if gateway.Spec.Ingress.Enabled && len(gateway.Spec.Ingress.Domains) > 0 {
+	// Collect all domains from watched Ingresses
+	domains := r.collectDomainsFromIngresses(gateway)
+
+	// Ingress proxies (if enabled and we have domains)
+	if gateway.Spec.Ingress.Enabled && len(domains) > 0 {
 		// HTTP proxy
 		builder.WriteString("[[proxies]]\n")
 		builder.WriteString("name = \"ingress-http\"\n")
 		builder.WriteString("type = \"http\"\n")
 		builder.WriteString(fmt.Sprintf("localIP = \"%s\"\n", traefikServiceAddress))
 		builder.WriteString(fmt.Sprintf("localPort = %d\n", httpPort))
-		builder.WriteString(fmt.Sprintf("customDomains = [%s]\n\n", r.formatDomainList(gateway.Spec.Ingress.Domains)))
+		builder.WriteString(fmt.Sprintf("customDomains = [%s]\n\n", r.formatDomainList(domains)))
 
 		// HTTPS proxy
 		builder.WriteString("[[proxies]]\n")
@@ -185,7 +197,7 @@ func (r *VPSGatewayReconciler) generateFrpcConfig(ctx context.Context, gateway *
 		builder.WriteString("type = \"https\"\n")
 		builder.WriteString(fmt.Sprintf("localIP = \"%s\"\n", traefikServiceAddress))
 		builder.WriteString(fmt.Sprintf("localPort = %d\n", httpsPort))
-		builder.WriteString(fmt.Sprintf("customDomains = [%s]\n\n", r.formatDomainList(gateway.Spec.Ingress.Domains)))
+		builder.WriteString(fmt.Sprintf("customDomains = [%s]\n\n", r.formatDomainList(domains)))
 	}
 
 	// Egress visitor (if enabled)
@@ -199,6 +211,26 @@ func (r *VPSGatewayReconciler) generateFrpcConfig(ctx context.Context, gateway *
 	}
 
 	return builder.String(), nil
+}
+
+// collectDomainsFromIngresses collects all unique domains from watched Ingresses
+func (r *VPSGatewayReconciler) collectDomainsFromIngresses(gateway *gatewayv1alpha1.VPSGateway) []string {
+	domainSet := make(map[string]struct{})
+
+	for _, ingress := range gateway.Status.WatchedIngresses {
+		for _, domain := range ingress.Domains {
+			domainSet[domain] = struct{}{}
+		}
+	}
+
+	domains := make([]string, 0, len(domainSet))
+	for domain := range domainSet {
+		domains = append(domains, domain)
+	}
+
+	// Sort for deterministic output
+	sort.Strings(domains)
+	return domains
 }
 
 // formatDomainList formats a slice of domains for TOML array syntax
@@ -215,7 +247,7 @@ func (r *VPSGatewayReconciler) getTokenFromSecret(ctx context.Context, gateway *
 	secret := &corev1.Secret{}
 	secretName := types.NamespacedName{
 		Name:      gateway.Spec.FRP.TokenSecretRef.Name,
-		Namespace: gateway.Namespace,
+		Namespace: gateway.Spec.FRP.TokenSecretRef.Namespace,
 	}
 
 	if err := r.Get(ctx, secretName, secret); err != nil {
@@ -244,10 +276,11 @@ func (r *VPSGatewayReconciler) getTokenFromSecret(ctx context.Context, gateway *
 func (r *VPSGatewayReconciler) reconcileDeployment(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
 	logger := log.FromContext(ctx)
 
+	namespace := r.getResourceNamespace(gateway)
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      r.getDeploymentName(gateway),
-			Namespace: gateway.Namespace,
+			Namespace: namespace,
 		},
 	}
 
@@ -351,8 +384,9 @@ func (r *VPSGatewayReconciler) reconcileDeployment(ctx context.Context, gateway 
 			},
 		}
 
-		// Set owner reference
-		return controllerutil.SetControllerReference(gateway, deployment, r.Scheme)
+		// Note: Cannot set OwnerReference for cluster-scoped owner to namespace-scoped resource
+		// The Deployment will be cleaned up via finalizer instead
+		return nil
 	})
 
 	if err != nil {
@@ -360,14 +394,15 @@ func (r *VPSGatewayReconciler) reconcileDeployment(ctx context.Context, gateway 
 		return err
 	}
 
-	if op == controllerutil.OperationResultCreated {
+	switch op {
+	case controllerutil.OperationResultCreated:
 		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonDeploymentCreated,
-			fmt.Sprintf("Deployment %s created", deployment.Name))
-		logger.Info("Deployment created", "name", deployment.Name)
-	} else if op == controllerutil.OperationResultUpdated {
+			fmt.Sprintf("Deployment %s/%s created", namespace, deployment.Name))
+		logger.Info("Deployment created", "name", deployment.Name, "namespace", namespace)
+	case controllerutil.OperationResultUpdated:
 		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonDeploymentUpdated,
-			fmt.Sprintf("Deployment %s updated", deployment.Name))
-		logger.Info("Deployment updated", "name", deployment.Name)
+			fmt.Sprintf("Deployment %s/%s updated", namespace, deployment.Name))
+		logger.Info("Deployment updated", "name", deployment.Name, "namespace", namespace)
 	}
 
 	return nil
@@ -386,7 +421,7 @@ func (r *VPSGatewayReconciler) isDeploymentReady(ctx context.Context, gateway *g
 	deployment := &appsv1.Deployment{}
 	deploymentName := types.NamespacedName{
 		Name:      r.getDeploymentName(gateway),
-		Namespace: gateway.Namespace,
+		Namespace: r.getResourceNamespace(gateway),
 	}
 
 	if err := r.Get(ctx, deploymentName, deployment); err != nil {
@@ -430,10 +465,11 @@ func (r *VPSGatewayReconciler) isDeploymentReady(ctx context.Context, gateway *g
 func (r *VPSGatewayReconciler) reconcileService(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
 	logger := log.FromContext(ctx)
 
+	namespace := r.getResourceNamespace(gateway)
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      r.getServiceName(gateway),
-			Namespace: gateway.Namespace,
+			Namespace: namespace,
 		},
 	}
 
@@ -454,8 +490,8 @@ func (r *VPSGatewayReconciler) reconcileService(ctx context.Context, gateway *ga
 			},
 		}
 
-		// Set owner reference
-		return controllerutil.SetControllerReference(gateway, service, r.Scheme)
+		// Note: Cannot set OwnerReference for cluster-scoped owner to namespace-scoped resource
+		return nil
 	})
 
 	if err != nil {
@@ -463,14 +499,15 @@ func (r *VPSGatewayReconciler) reconcileService(ctx context.Context, gateway *ga
 		return err
 	}
 
-	if op == controllerutil.OperationResultCreated {
+	switch op {
+	case controllerutil.OperationResultCreated:
 		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonServiceCreated,
-			fmt.Sprintf("Service %s created", service.Name))
-		logger.Info("Service created", "name", service.Name)
-	} else if op == controllerutil.OperationResultUpdated {
+			fmt.Sprintf("Service %s/%s created", namespace, service.Name))
+		logger.Info("Service created", "name", service.Name, "namespace", namespace)
+	case controllerutil.OperationResultUpdated:
 		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonServiceUpdated,
-			fmt.Sprintf("Service %s updated", service.Name))
-		logger.Info("Service updated", "name", service.Name)
+			fmt.Sprintf("Service %s/%s updated", namespace, service.Name))
+		logger.Info("Service updated", "name", service.Name, "namespace", namespace)
 	}
 
 	return nil
@@ -481,7 +518,7 @@ func (r *VPSGatewayReconciler) deleteServiceIfExists(ctx context.Context, gatewa
 	service := &corev1.Service{}
 	serviceName := types.NamespacedName{
 		Name:      r.getServiceName(gateway),
-		Namespace: gateway.Namespace,
+		Namespace: r.getResourceNamespace(gateway),
 	}
 
 	err := r.Get(ctx, serviceName, service)
@@ -516,7 +553,7 @@ func (r *VPSGatewayReconciler) getConfigMapHash(ctx context.Context, gateway *ga
 	configMap := &corev1.ConfigMap{}
 	configMapName := types.NamespacedName{
 		Name:      r.getConfigMapName(gateway),
-		Namespace: gateway.Namespace,
+		Namespace: r.getResourceNamespace(gateway),
 	}
 
 	if err := r.Get(ctx, configMapName, configMap); err != nil {
@@ -536,186 +573,72 @@ func (r *VPSGatewayReconciler) getConfigMapHash(ctx context.Context, gateway *ga
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// reconcileFrpcService creates or updates the frpc Service for Ingress routing
-func (r *VPSGatewayReconciler) reconcileFrpcService(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+// reconcileIngressClass creates or updates the IngressClass for this VPSGateway
+func (r *VPSGatewayReconciler) reconcileIngressClass(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
 	logger := log.FromContext(ctx)
 
-	service := &corev1.Service{
+	ingressClassName := r.getIngressClassName(gateway)
+	ingressClass := &networkingv1.IngressClass{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.getFrpcServiceName(gateway),
-			Namespace: gateway.Namespace,
+			Name: ingressClassName,
 		},
 	}
 
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
-		labels := r.getCommonLabels(gateway)
-
-		service.Labels = labels
-		service.Spec.Selector = labels
-		service.Spec.Type = corev1.ServiceTypeClusterIP
-
-		service.Spec.Ports = []corev1.ServicePort{
-			{
-				Name:       "http",
-				Port:       int32(httpPort),
-				TargetPort: intstr.FromInt(httpPort),
-				Protocol:   corev1.ProtocolTCP,
-			},
-			{
-				Name:       "https",
-				Port:       int32(httpsPort),
-				TargetPort: intstr.FromInt(httpsPort),
-				Protocol:   corev1.ProtocolTCP,
-			},
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, ingressClass, func() error {
+		// Set labels
+		ingressClass.Labels = map[string]string{
+			"app.kubernetes.io/managed-by":  "homelab-gateway-operator",
+			"app.kubernetes.io/instance":    gateway.Name,
+			"gateway.hmdyt.github.io/owner": gateway.Name,
 		}
 
-		return controllerutil.SetControllerReference(gateway, service, r.Scheme)
+		// Set the controller to a placeholder (we don't actually implement an Ingress controller)
+		// The IngressClass is used to associate Ingresses with VPSGateway
+		ingressClass.Spec.Controller = "gateway.hmdyt.github.io/vps-gateway"
+
+		// Set annotations with VPS address for reference
+		if ingressClass.Annotations == nil {
+			ingressClass.Annotations = make(map[string]string)
+		}
+		ingressClass.Annotations["gateway.hmdyt.github.io/vps-address"] = gateway.Spec.VPS.Address
+
+		// Set owner reference (both are cluster-scoped, so this works)
+		return controllerutil.SetControllerReference(gateway, ingressClass, r.Scheme)
 	})
 
 	if err != nil {
-		logger.Error(err, "Failed to reconcile frpc Service")
+		logger.Error(err, "Failed to reconcile IngressClass")
 		return err
 	}
 
-	if op == controllerutil.OperationResultCreated {
-		logger.Info("frpc Service created", "name", service.Name)
-	} else if op == controllerutil.OperationResultUpdated {
-		logger.Info("frpc Service updated", "name", service.Name)
+	switch op {
+	case controllerutil.OperationResultCreated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonIngressClassCreated,
+			fmt.Sprintf("IngressClass %s created", ingressClass.Name))
+		logger.Info("IngressClass created", "name", ingressClass.Name)
+	case controllerutil.OperationResultUpdated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonIngressClassUpdated,
+			fmt.Sprintf("IngressClass %s updated", ingressClass.Name))
+		logger.Info("IngressClass updated", "name", ingressClass.Name)
 	}
 
 	return nil
 }
 
-// reconcileIngress creates or updates the Ingress resource for each domain
-func (r *VPSGatewayReconciler) reconcileIngress(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
-	logger := log.FromContext(ctx)
-
-	// First, create the frpc service that the Ingress will route to
-	if err := r.reconcileFrpcService(ctx, gateway); err != nil {
-		return err
+// deleteIngressClassIfExists deletes the IngressClass if it exists
+func (r *VPSGatewayReconciler) deleteIngressClassIfExists(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	ingressClass := &networkingv1.IngressClass{}
+	ingressClassName := types.NamespacedName{
+		Name: r.getIngressClassName(gateway),
 	}
 
-	ingress := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.getIngressName(gateway),
-			Namespace: gateway.Namespace,
-		},
-	}
-
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, ingress, func() error {
-		labels := r.getCommonLabels(gateway)
-		ingress.Labels = labels
-
-		// Set annotations for cert-manager if TLS is enabled
-		if ingress.Annotations == nil {
-			ingress.Annotations = make(map[string]string)
-		}
-		if gateway.Spec.Ingress.TLS.Enabled {
-			ingress.Annotations["cert-manager.io/cluster-issuer"] = gateway.Spec.Ingress.TLS.Issuer
-		}
-
-		// Set IngressClassName
-		ingressClassName := gateway.Spec.Ingress.IngressClassName
-		ingress.Spec.IngressClassName = &ingressClassName
-
-		// Build rules for each domain
-		pathType := networkingv1.PathTypePrefix
-		var rules []networkingv1.IngressRule
-		var tlsHosts []string
-
-		for _, domain := range gateway.Spec.Ingress.Domains {
-			rules = append(rules, networkingv1.IngressRule{
-				Host: domain,
-				IngressRuleValue: networkingv1.IngressRuleValue{
-					HTTP: &networkingv1.HTTPIngressRuleValue{
-						Paths: []networkingv1.HTTPIngressPath{
-							{
-								Path:     "/",
-								PathType: &pathType,
-								Backend: networkingv1.IngressBackend{
-									Service: &networkingv1.IngressServiceBackend{
-										Name: r.getFrpcServiceName(gateway),
-										Port: networkingv1.ServiceBackendPort{
-											Number: int32(httpPort),
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			})
-			tlsHosts = append(tlsHosts, domain)
-		}
-
-		ingress.Spec.Rules = rules
-
-		// Configure TLS if enabled
-		if gateway.Spec.Ingress.TLS.Enabled && len(tlsHosts) > 0 {
-			ingress.Spec.TLS = []networkingv1.IngressTLS{
-				{
-					Hosts:      tlsHosts,
-					SecretName: fmt.Sprintf("%s-tls", gateway.Name),
-				},
-			}
-		} else {
-			ingress.Spec.TLS = nil
-		}
-
-		return controllerutil.SetControllerReference(gateway, ingress, r.Scheme)
-	})
-
+	err := r.Get(ctx, ingressClassName, ingressClass)
 	if err != nil {
-		logger.Error(err, "Failed to reconcile Ingress")
-		return err
-	}
-
-	if op == controllerutil.OperationResultCreated {
-		r.Recorder.Event(gateway, corev1.EventTypeNormal, "IngressCreated",
-			fmt.Sprintf("Ingress %s created", ingress.Name))
-		logger.Info("Ingress created", "name", ingress.Name)
-	} else if op == controllerutil.OperationResultUpdated {
-		r.Recorder.Event(gateway, corev1.EventTypeNormal, "IngressUpdated",
-			fmt.Sprintf("Ingress %s updated", ingress.Name))
-		logger.Info("Ingress updated", "name", ingress.Name)
-	}
-
-	return nil
-}
-
-// deleteIngressIfExists deletes the ingress and frpc service if they exist
-func (r *VPSGatewayReconciler) deleteIngressIfExists(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
-	// Delete Ingress
-	ingress := &networkingv1.Ingress{}
-	ingressName := types.NamespacedName{
-		Name:      r.getIngressName(gateway),
-		Namespace: gateway.Namespace,
-	}
-
-	err := r.Get(ctx, ingressName, ingress)
-	if err == nil {
-		if err := r.Delete(ctx, ingress); err != nil && !apierrors.IsNotFound(err) {
-			return err
+		if apierrors.IsNotFound(err) {
+			return nil
 		}
-	} else if !apierrors.IsNotFound(err) {
 		return err
 	}
 
-	// Delete frpc Service
-	service := &corev1.Service{}
-	serviceName := types.NamespacedName{
-		Name:      r.getFrpcServiceName(gateway),
-		Namespace: gateway.Namespace,
-	}
-
-	err = r.Get(ctx, serviceName, service)
-	if err == nil {
-		if err := r.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	} else if !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	return nil
+	return r.Delete(ctx, ingressClass)
 }

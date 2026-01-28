@@ -16,7 +16,7 @@ spec:
     shortNames:
     - vpsgw
     singular: vpsgateway
-  scope: Namespaced
+  scope: Cluster
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.phase
@@ -106,8 +106,14 @@ spec:
                         description: Name of the secret
                         minLength: 1
                         type: string
+                      namespace:
+                        description: Namespace of the secret (required for Cluster-scoped
+                          VPSGateway)
+                        minLength: 1
+                        type: string
                     required:
                     - name
+                    - namespace
                     type: object
                 required:
                 - tokenSecretRef
@@ -116,23 +122,30 @@ spec:
                 description: Ingress defines the ingress configuration for routing
                   traffic to the VPS
                 properties:
-                  domains:
-                    description: |-
-                      Domains is the list of domains to route to the VPS
-                      Required when Enabled is true
-                    items:
-                      type: string
-                    minItems: 1
-                    type: array
+                  dns:
+                    description: DNS defines the DNS configuration for external-dns
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled controls whether DNSEndpoint resources
+                          should be created
+                        type: boolean
+                      ttl:
+                        default: 300
+                        description: TTL is the DNS record TTL in seconds
+                        format: int64
+                        minimum: 60
+                        type: integer
+                    type: object
                   enabled:
                     default: true
                     description: Enabled controls whether ingress resources should
                       be created
                     type: boolean
                   ingressClassName:
-                    default: traefik
-                    description: IngressClassName is the name of the IngressClass
-                      to use
+                    description: |-
+                      IngressClassName is the name of the IngressClass to create
+                      Defaults to vps-gateway-{VPSGateway name}
                     minLength: 1
                     type: string
                   tls:
@@ -256,13 +269,31 @@ spec:
                 - Ready
                 - Error
                 type: string
+              watchedIngresses:
+                description: WatchedIngresses is the list of Ingresses currently watched
+                  by this VPSGateway
+                items:
+                  description: WatchedIngress represents an Ingress being watched
+                    by the VPSGateway
+                  properties:
+                    domains:
+                      description: Domains extracted from the Ingress rules
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: Name of the Ingress
+                      type: string
+                    namespace:
+                      description: Namespace of the Ingress
+                      type: string
+                  required:
+                  - name
+                  - namespace
+                  type: object
+                type: array
             type: object
         type: object
-        x-kubernetes-validations:
-        - message: domains must be specified when ingress is enabled
-          rule: '!has(self.spec.ingress) || !has(self.spec.ingress.enabled) || self.spec.ingress.enabled
-            == false || (has(self.spec.ingress.domains) && size(self.spec.ingress.domains)
-            > 0)'
     served: true
     storage: true
     subresources:
