@@ -1,135 +1,195 @@
 # homelab-gateway-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+Kubernetes Operator for managing VPS Gateway with frp (Fast Reverse Proxy) for homelab environments.
 
-## Getting Started
+## 概要
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+このオペレーターは、グローバル IP を持たないホームラボ Kubernetes クラスタが VPS を経由してインターネットと通信するための frp クライアントを自動管理します。
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+### 主な機能
 
-```sh
-make docker-build docker-push IMG=<some-registry>/homelab-gateway-operator:tag
-```
+- **VPSGateway CRD**: VPS と frp の設定を宣言的に管理
+- **自動リソース生成**: frpc ConfigMap, Deployment, Service を自動作成
+- **Ingress サポート**: Traefik などの Ingress Controller への自動ルーティング
+- **Egress サポート**: VPS 経由の Egress プロキシ設定
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+## クイックスタート
 
-**Install the CRDs into the cluster:**
+### 前提条件
+
+- Go version v1.24.6+
+- Kubernetes v1.11.3+ クラスタ
+- kubectl version v1.11.3+
+- VPS with frps (frp server) running
+
+### インストール
+
+1. **CRD をインストール**
 
 ```sh
 make install
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+2. **Operator をローカル実行（開発用）**
 
 ```sh
-make deploy IMG=<some-registry>/homelab-gateway-operator:tag
+make run
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+または
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+3. **Operator をクラスタにデプロイ**
 
 ```sh
-kubectl apply -k config/samples/
+# イメージをビルドしてプッシュ
+make docker-build docker-push IMG=<your-registry>/homelab-gateway-operator:tag
+
+# デプロイ
+make deploy IMG=<your-registry>/homelab-gateway-operator:tag
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+### 使用方法
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+1. **frp 認証トークン用の Secret を作成**
 
-```sh
-kubectl delete -k config/samples/
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: frp-token
+type: Opaque
+stringData:
+  token: "your-frp-server-token"
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+```sh
+kubectl apply -f config/samples/secret_frp-token.yaml
+```
+
+2. **VPSGateway リソースを作成**
+
+```yaml
+apiVersion: gateway.hmdyt.github.io/v1alpha1
+kind: VPSGateway
+metadata:
+  name: my-gateway
+spec:
+  vps:
+    address: "203.0.113.1"  # あなたの VPS の IP アドレス
+
+  frp:
+    port: 7000
+    tokenSecretRef:
+      name: frp-token
+
+  ingress:
+    enabled: true
+    domains:
+      - "*.example.com"
+
+  egress:
+    enabled: false  # 必要に応じて true に
+```
 
 ```sh
+kubectl apply -f config/samples/gateway_v1alpha1_vpsgateway.yaml
+```
+
+3. **状態を確認**
+
+```sh
+kubectl get vpsgw
+kubectl describe vpsgw my-gateway
+```
+
+### 生成されるリソース
+
+VPSGateway を作成すると、以下のリソースが自動的に生成されます:
+
+- **ConfigMap** (`frpc-config-<name>`): frp クライアント設定 (TOML)
+- **Deployment** (`frpc-<name>`): frpc コンテナを実行
+- **Service** (`egress-proxy-<name>`): Egress が有効な場合のみ
+
+すべてのリソースには OwnerReference が設定されており、VPSGateway を削除すると自動的にクリーンアップされます。
+
+## 設定オプション
+
+### VPSGateway Spec
+
+```yaml
+spec:
+  vps:
+    address: string          # 必須: VPS の IP アドレスまたはホスト名
+    namespace: string        # オプション: リソースを作成する namespace (デフォルト: CR と同じ)
+
+  frp:
+    port: int32             # オプション: frp サーバーポート (デフォルト: 7000)
+    tokenSecretRef:
+      name: string          # 必須: トークンを含む Secret の名前
+      key: string           # オプション: Secret 内のキー (デフォルト: "token")
+    image: string           # オプション: frpc イメージ (デフォルト: "snowdreamtech/frpc:0.53.2")
+
+  ingress:
+    enabled: bool           # オプション: Ingress を有効化 (デフォルト: true)
+    domains: []string       # 必須 (enabled が true の場合): ルーティングするドメインリスト
+    ingressClassName: string # オプション: IngressClass 名 (デフォルト: "traefik")
+    tls:
+      enabled: bool         # オプション: TLS を有効化 (デフォルト: true)
+      issuer: string        # オプション: cert-manager Issuer 名 (デフォルト: "letsencrypt-prod")
+
+  egress:
+    enabled: bool           # オプション: Egress プロキシを有効化 (デフォルト: false)
+    proxyPort: int32        # オプション: プロキシポート (デフォルト: 3128)
+    noProxy: []string       # オプション: プロキシをバイパスするホストリスト
+```
+
+### VPSGateway Status
+
+```yaml
+status:
+  phase: string                 # Pending | Ready | Error
+  frpcReady: bool               # frpc Deployment の準備状態
+  egressProxyReady: bool        # Egress Service の準備状態
+  lastSyncTime: timestamp       # 最後の同期時刻
+  observedGeneration: int64     # 観測された世代番号
+  conditions: []Condition       # 詳細な状態情報
+```
+
+## 開発
+
+### テスト
+
+```sh
+# ユニットテスト
+make test
+
+# E2E テスト
+make test-e2e
+```
+
+### Lint
+
+```sh
+make lint
+```
+
+### コード生成
+
+```sh
+# DeepCopy メソッドを生成
+make generate
+
+# CRD マニフェストを生成
+make manifests
+```
+
+## アンインストール
+
+```sh
+# CRD を削除
 make uninstall
-```
 
-**UnDeploy the controller from the cluster:**
-
-```sh
+# Operator をアンデプロイ
 make undeploy
 ```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/homelab-gateway-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/homelab-gateway-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 

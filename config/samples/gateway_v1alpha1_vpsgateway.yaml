@@ -1,0 +1,38 @@
+apiVersion: gateway.hmdyt.github.io/v1alpha1
+kind: VPSGateway
+metadata:
+  labels:
+    app.kubernetes.io/name: homelab-gateway-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: vpsgateway-sample
+spec:
+  vps:
+    address: "203.0.113.1"  # Replace with your VPS IP address (RFC 5737 TEST-NET-3)
+
+  frp:
+    port: 7000
+    tokenSecretRef:
+      name: frp-token
+      key: token  # Optional: defaults to "token"
+    image: "snowdreamtech/frpc:0.53.2"  # Optional: uses default if not specified
+
+  ingress:
+    enabled: true
+    domains:
+      - "*.example.com"  # Replace with your domain
+      - "app.example.com"
+    ingressClassName: "traefik"  # Optional: defaults to "traefik"
+    tls:
+      enabled: true  # Optional: defaults to true
+      issuer: "letsencrypt-prod"  # Optional: defaults to "letsencrypt-prod"
+
+  egress:
+    enabled: true  # Optional: defaults to false
+    proxyPort: 3128  # Optional: defaults to 3128
+    noProxy:  # Optional: list of hosts to bypass proxy
+      - "localhost"
+      - "127.0.0.1"
+      - ".svc"
+      - ".cluster.local"
+      - "10.0.0.0/8"
+      - "192.168.0.0/16"
