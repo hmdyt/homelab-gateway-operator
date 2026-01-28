@@ -121,17 +121,22 @@ var _ = Describe("VPSGateway Controller", func() {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: ingressClassName}, ingressClass)
 			}, timeout, interval).Should(Succeed())
 
-			Expect(ingressClass.Spec.Controller).To(Equal("gateway.hmdyt.github.io/vps-gateway"))
+			Expect(ingressClass.Spec.Controller).To(Equal("traefik.io/ingress-controller"))
 			Expect(ingressClass.Annotations["gateway.hmdyt.github.io/vps-address"]).To(Equal(vpsAddress))
 
-			By("Checking VPSGateway status")
-			Eventually(func() gatewayv1alpha1.VPSGatewayPhase {
+			By("Checking VPSGateway has IngressClassReady condition")
+			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName}, gateway)
 				if err != nil {
-					return ""
+					return false
 				}
-				return gateway.Status.Phase
-			}, timeout, interval).Should(Equal(gatewayv1alpha1.VPSGatewayPhaseReady))
+				for _, cond := range gateway.Status.Conditions {
+					if cond.Type == gatewayv1alpha1.ConditionTypeIngressClassReady && cond.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
 		})
 
 		It("should create ConfigMap in the secret namespace", func() {

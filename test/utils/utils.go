@@ -173,8 +173,9 @@ func GetProjectDir() (string, error) {
 	return wd, nil
 }
 
-// ExternalDNSCRDURL is the URL for the external-dns DNSEndpoint CRD
-const externalDNSCRDURL = "https://raw.githubusercontent.com/kubernetes-sigs/external-dns/master/config/crd/standard/dnsendpoints.externaldns.k8s.io.yaml"
+// externalDNSCRDURL is the URL for the external-dns DNSEndpoint CRD
+const externalDNSCRDURL = "https://raw.githubusercontent.com/kubernetes-sigs/external-dns/" +
+	"master/config/crd/standard/dnsendpoints.externaldns.k8s.io.yaml"
 
 // InstallExternalDNSCRD installs the external-dns DNSEndpoint CRD
 func InstallExternalDNSCRD() error {

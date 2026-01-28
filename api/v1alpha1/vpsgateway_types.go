@@ -88,6 +88,25 @@ type SecretReference struct {
 	Namespace string `json:"namespace"`
 }
 
+// IngressControllerConfig defines the Ingress Controller configuration
+type IngressControllerConfig struct {
+	// Enabled controls whether Traefik is managed by this operator
+	// +optional
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Image is the Traefik container image
+	// +optional
+	// +kubebuilder:default="traefik:v3.2"
+	Image string `json:"image,omitempty"`
+
+	// Replicas is the number of Traefik replicas
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	Replicas int32 `json:"replicas,omitempty"`
+}
+
 // IngressConfig defines the ingress configuration
 type IngressConfig struct {
 	// Enabled controls whether ingress resources should be created
@@ -100,6 +119,10 @@ type IngressConfig struct {
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	IngressClassName string `json:"ingressClassName,omitempty"`
+
+	// Controller defines the Ingress Controller configuration
+	// +optional
+	Controller IngressControllerConfig `json:"controller,omitempty"`
 
 	// TLS defines the TLS configuration for ingress
 	// +optional
@@ -188,6 +211,10 @@ type VPSGatewayStatus struct {
 	// +optional
 	FRPCReady bool `json:"frpcReady,omitempty"`
 
+	// IngressControllerReady indicates whether the Traefik deployment is ready
+	// +optional
+	IngressControllerReady bool `json:"ingressControllerReady,omitempty"`
+
 	// EgressProxyReady indicates whether the egress proxy is ready
 	// +optional
 	EgressProxyReady bool `json:"egressProxyReady,omitempty"`
@@ -223,6 +250,8 @@ const (
 	ConditionTypeReady = "Ready"
 	// ConditionTypeFRPCReady indicates the frpc deployment is ready
 	ConditionTypeFRPCReady = "FRPCReady"
+	// ConditionTypeIngressControllerReady indicates the Traefik deployment is ready
+	ConditionTypeIngressControllerReady = "IngressControllerReady"
 	// ConditionTypeEgressProxyReady indicates the egress proxy is ready
 	ConditionTypeEgressProxyReady = "EgressProxyReady"
 	// ConditionTypeSecretFound indicates the token secret was found

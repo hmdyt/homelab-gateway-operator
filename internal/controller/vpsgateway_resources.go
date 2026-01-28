@@ -40,12 +40,14 @@ import (
 
 const (
 	// Default values
-	defaultSecretKey            = "token"
-	defaultFRPCImage            = "snowdreamtech/frpc:0.53.2"
-	traefikServiceAddress       = "traefik.traefik.svc.cluster.local"
-	httpPort                    = 80
-	httpsPort                   = 443
-	frpcUID               int64 = 1000
+	defaultSecretKey          = "token"
+	defaultFRPCImage          = "snowdreamtech/frpc:0.53.2"
+	defaultTraefikImage       = "traefik:v3.2"
+	httpPort                  = 80
+	httpsPort                 = 443
+	traefikAdminPort          = 8080
+	frpcUID             int64 = 1000
+	traefikUID          int64 = 65532
 )
 
 // SecretKeyNotFoundError represents an error when a secret key is not found
@@ -73,6 +75,24 @@ func (r *VPSGatewayReconciler) getServiceName(gateway *gatewayv1alpha1.VPSGatewa
 
 func (r *VPSGatewayReconciler) getIngressClassName(gateway *gatewayv1alpha1.VPSGateway) string {
 	return getIngressClassName(gateway)
+}
+
+func (r *VPSGatewayReconciler) getTraefikDeploymentName(gateway *gatewayv1alpha1.VPSGateway) string {
+	return fmt.Sprintf("traefik-%s", gateway.Name)
+}
+
+func (r *VPSGatewayReconciler) getTraefikServiceName(gateway *gatewayv1alpha1.VPSGateway) string {
+	return fmt.Sprintf("traefik-%s", gateway.Name)
+}
+
+func (r *VPSGatewayReconciler) getTraefikConfigMapName(gateway *gatewayv1alpha1.VPSGateway) string {
+	return fmt.Sprintf("traefik-config-%s", gateway.Name)
+}
+
+func (r *VPSGatewayReconciler) getTraefikServiceAddress(gateway *gatewayv1alpha1.VPSGateway) string {
+	return fmt.Sprintf("%s.%s.svc.cluster.local",
+		r.getTraefikServiceName(gateway),
+		r.getResourceNamespace(gateway))
 }
 
 // getResourceNamespace returns the namespace for deploying frpc resources
@@ -183,11 +203,14 @@ func (r *VPSGatewayReconciler) generateFrpcConfig(ctx context.Context, gateway *
 
 	// Ingress proxies (if enabled and we have domains)
 	if gateway.Spec.Ingress.Enabled && len(domains) > 0 {
+		// Get Traefik service address (dynamic based on VPSGateway name)
+		traefikServiceAddr := r.getTraefikServiceAddress(gateway)
+
 		// HTTP proxy
 		builder.WriteString("[[proxies]]\n")
 		builder.WriteString("name = \"ingress-http\"\n")
 		builder.WriteString("type = \"http\"\n")
-		builder.WriteString(fmt.Sprintf("localIP = \"%s\"\n", traefikServiceAddress))
+		builder.WriteString(fmt.Sprintf("localIP = \"%s\"\n", traefikServiceAddr))
 		builder.WriteString(fmt.Sprintf("localPort = %d\n", httpPort))
 		builder.WriteString(fmt.Sprintf("customDomains = [%s]\n\n", r.formatDomainList(domains)))
 
@@ -195,7 +218,7 @@ func (r *VPSGatewayReconciler) generateFrpcConfig(ctx context.Context, gateway *
 		builder.WriteString("[[proxies]]\n")
 		builder.WriteString("name = \"ingress-https\"\n")
 		builder.WriteString("type = \"https\"\n")
-		builder.WriteString(fmt.Sprintf("localIP = \"%s\"\n", traefikServiceAddress))
+		builder.WriteString(fmt.Sprintf("localIP = \"%s\"\n", traefikServiceAddr))
 		builder.WriteString(fmt.Sprintf("localPort = %d\n", httpsPort))
 		builder.WriteString(fmt.Sprintf("customDomains = [%s]\n\n", r.formatDomainList(domains)))
 	}
@@ -592,9 +615,9 @@ func (r *VPSGatewayReconciler) reconcileIngressClass(ctx context.Context, gatewa
 			"gateway.hmdyt.github.io/owner": gateway.Name,
 		}
 
-		// Set the controller to a placeholder (we don't actually implement an Ingress controller)
-		// The IngressClass is used to associate Ingresses with VPSGateway
-		ingressClass.Spec.Controller = "gateway.hmdyt.github.io/vps-gateway"
+		// Set the controller to Traefik's ingress controller
+		// Traefik will watch Ingresses with this IngressClass
+		ingressClass.Spec.Controller = "traefik.io/ingress-controller"
 
 		// Set annotations with VPS address for reference
 		if ingressClass.Annotations == nil {
@@ -641,4 +664,530 @@ func (r *VPSGatewayReconciler) deleteIngressClassIfExists(ctx context.Context, g
 	}
 
 	return r.Delete(ctx, ingressClass)
+}
+
+// getTraefikImage returns the Traefik image from spec or default
+func (r *VPSGatewayReconciler) getTraefikImage(gateway *gatewayv1alpha1.VPSGateway) string {
+	if gateway.Spec.Ingress.Controller.Image != "" {
+		return gateway.Spec.Ingress.Controller.Image
+	}
+	return defaultTraefikImage
+}
+
+// getTraefikReplicas returns the Traefik replicas from spec or default
+func (r *VPSGatewayReconciler) getTraefikReplicas(gateway *gatewayv1alpha1.VPSGateway) int32 {
+	if gateway.Spec.Ingress.Controller.Replicas > 0 {
+		return gateway.Spec.Ingress.Controller.Replicas
+	}
+	return 1
+}
+
+// getTraefikLabels returns common labels for Traefik resources
+func (r *VPSGatewayReconciler) getTraefikLabels(gateway *gatewayv1alpha1.VPSGateway) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       "traefik",
+		"app.kubernetes.io/instance":   gateway.Name,
+		"app.kubernetes.io/component":  "ingress-controller",
+		"app.kubernetes.io/part-of":    "homelab-gateway",
+		"app.kubernetes.io/managed-by": "homelab-gateway-operator",
+	}
+}
+
+// getTraefikSecurityContext returns the security context for Traefik container
+func getTraefikSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr(false),
+		RunAsNonRoot:             ptr(true),
+		RunAsUser:                ptr(traefikUID),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+		ReadOnlyRootFilesystem: ptr(true),
+	}
+}
+
+// getTraefikPodSecurityContext returns the pod security context for Traefik
+func getTraefikPodSecurityContext() *corev1.PodSecurityContext {
+	return &corev1.PodSecurityContext{
+		RunAsNonRoot: ptr(true),
+		RunAsUser:    ptr(traefikUID),
+		FSGroup:      ptr(traefikUID),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+}
+
+// generateTraefikConfig generates YAML configuration for Traefik v3
+func (r *VPSGatewayReconciler) generateTraefikConfig(gateway *gatewayv1alpha1.VPSGateway) string {
+	ingressClassName := r.getIngressClassName(gateway)
+
+	var builder strings.Builder
+
+	// Entry points configuration
+	builder.WriteString("entryPoints:\n")
+	builder.WriteString("  web:\n")
+	builder.WriteString("    address: \":80\"\n")
+	builder.WriteString("    http:\n")
+	builder.WriteString("      redirections:\n")
+	builder.WriteString("        entryPoint:\n")
+	builder.WriteString("          to: websecure\n")
+	builder.WriteString("          scheme: https\n")
+	builder.WriteString("  websecure:\n")
+	builder.WriteString("    address: \":443\"\n")
+	builder.WriteString("  traefik:\n")
+	builder.WriteString("    address: \":8080\"\n")
+	builder.WriteString("\n")
+
+	// Kubernetes Ingress provider configuration
+	builder.WriteString("providers:\n")
+	builder.WriteString("  kubernetesIngress:\n")
+	builder.WriteString(fmt.Sprintf("    ingressClass: %s\n", ingressClassName))
+	builder.WriteString("    allowEmptyServices: true\n")
+	builder.WriteString("\n")
+
+	// API configuration (for dashboard)
+	builder.WriteString("api:\n")
+	builder.WriteString("  dashboard: true\n")
+	builder.WriteString("  insecure: true\n")
+	builder.WriteString("\n")
+
+	// Ping configuration (for health checks)
+	builder.WriteString("ping:\n")
+	builder.WriteString("  entryPoint: traefik\n")
+	builder.WriteString("\n")
+
+	// Logging configuration
+	builder.WriteString("log:\n")
+	builder.WriteString("  level: INFO\n")
+
+	return builder.String()
+}
+
+// reconcileTraefikConfigMap creates or updates the Traefik configuration ConfigMap
+func (r *VPSGatewayReconciler) reconcileTraefikConfigMap(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	logger := log.FromContext(ctx)
+
+	namespace := r.getResourceNamespace(gateway)
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      r.getTraefikConfigMapName(gateway),
+			Namespace: namespace,
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
+		// Generate YAML configuration
+		yamlConfig := r.generateTraefikConfig(gateway)
+
+		// Set data
+		if configMap.Data == nil {
+			configMap.Data = make(map[string]string)
+		}
+		configMap.Data["traefik.yml"] = yamlConfig
+
+		// Set labels
+		configMap.Labels = r.getTraefikLabels(gateway)
+
+		return nil
+	})
+
+	if err != nil {
+		logger.Error(err, "Failed to reconcile Traefik ConfigMap")
+		return err
+	}
+
+	switch op {
+	case controllerutil.OperationResultCreated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonTraefikConfigMapCreated,
+			fmt.Sprintf("Traefik ConfigMap %s/%s created", namespace, configMap.Name))
+		logger.Info("Traefik ConfigMap created", "name", configMap.Name, "namespace", namespace)
+	case controllerutil.OperationResultUpdated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonTraefikConfigMapUpdated,
+			fmt.Sprintf("Traefik ConfigMap %s/%s updated", namespace, configMap.Name))
+		logger.Info("Traefik ConfigMap updated", "name", configMap.Name, "namespace", namespace)
+	}
+
+	return nil
+}
+
+// getTraefikConfigMapHash calculates the SHA256 hash of the Traefik ConfigMap data
+func (r *VPSGatewayReconciler) getTraefikConfigMapHash(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) (string, error) {
+	configMap := &corev1.ConfigMap{}
+	configMapName := types.NamespacedName{
+		Name:      r.getTraefikConfigMapName(gateway),
+		Namespace: r.getResourceNamespace(gateway),
+	}
+
+	if err := r.Get(ctx, configMapName, configMap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	h := sha256.New()
+	if data, exists := configMap.Data["traefik.yml"]; exists {
+		h.Write([]byte(data))
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// reconcileTraefikDeployment creates or updates the Traefik Deployment
+func (r *VPSGatewayReconciler) reconcileTraefikDeployment(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	logger := log.FromContext(ctx)
+
+	namespace := r.getResourceNamespace(gateway)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      r.getTraefikDeploymentName(gateway),
+			Namespace: namespace,
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
+		labels := r.getTraefikLabels(gateway)
+
+		deployment.Labels = labels
+
+		// Set replicas
+		replicas := r.getTraefikReplicas(gateway)
+		deployment.Spec.Replicas = &replicas
+
+		// Set selector
+		deployment.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: labels,
+		}
+
+		// Calculate ConfigMap hash to trigger pod restart on config changes
+		configHash, err := r.getTraefikConfigMapHash(ctx, gateway)
+		if err != nil {
+			return fmt.Errorf("failed to get Traefik ConfigMap hash: %w", err)
+		}
+
+		// Prepare annotations with ConfigMap hash
+		annotations := make(map[string]string)
+		if configHash != "" {
+			annotations["gateway.hmdyt.github.io/traefik-config-hash"] = configHash
+		}
+
+		// Set pod template
+		deployment.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:      labels,
+				Annotations: annotations,
+			},
+			Spec: corev1.PodSpec{
+				ServiceAccountName: r.getTraefikServiceAccountName(gateway),
+				Containers: []corev1.Container{
+					{
+						Name:  "traefik",
+						Image: r.getTraefikImage(gateway),
+						Args: []string{
+							"--configFile=/etc/traefik/traefik.yml",
+						},
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "web",
+								ContainerPort: int32(httpPort),
+								Protocol:      corev1.ProtocolTCP,
+							},
+							{
+								Name:          "websecure",
+								ContainerPort: int32(httpsPort),
+								Protocol:      corev1.ProtocolTCP,
+							},
+							{
+								Name:          "admin",
+								ContainerPort: int32(traefikAdminPort),
+								Protocol:      corev1.ProtocolTCP,
+							},
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "config",
+								MountPath: "/etc/traefik",
+								ReadOnly:  true,
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("100m"),
+								corev1.ResourceMemory: resource.MustParse("128Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+						},
+						SecurityContext: getTraefikSecurityContext(),
+						LivenessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/ping",
+									Port: intstr.FromInt(traefikAdminPort),
+								},
+							},
+							InitialDelaySeconds: 10,
+							PeriodSeconds:       10,
+							TimeoutSeconds:      5,
+							FailureThreshold:    3,
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/ping",
+									Port: intstr.FromInt(traefikAdminPort),
+								},
+							},
+							InitialDelaySeconds: 5,
+							PeriodSeconds:       5,
+							TimeoutSeconds:      5,
+							FailureThreshold:    3,
+						},
+					},
+				},
+				Volumes: []corev1.Volume{
+					{
+						Name: "config",
+						VolumeSource: corev1.VolumeSource{
+							ConfigMap: &corev1.ConfigMapVolumeSource{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: r.getTraefikConfigMapName(gateway),
+								},
+							},
+						},
+					},
+				},
+				SecurityContext: getTraefikPodSecurityContext(),
+			},
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		logger.Error(err, "Failed to reconcile Traefik Deployment")
+		return err
+	}
+
+	switch op {
+	case controllerutil.OperationResultCreated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonTraefikDeploymentCreated,
+			fmt.Sprintf("Traefik Deployment %s/%s created", namespace, deployment.Name))
+		logger.Info("Traefik Deployment created", "name", deployment.Name, "namespace", namespace)
+	case controllerutil.OperationResultUpdated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonTraefikDeploymentUpdated,
+			fmt.Sprintf("Traefik Deployment %s/%s updated", namespace, deployment.Name))
+		logger.Info("Traefik Deployment updated", "name", deployment.Name, "namespace", namespace)
+	}
+
+	return nil
+}
+
+// getTraefikServiceAccountName returns the ServiceAccount name for Traefik
+func (r *VPSGatewayReconciler) getTraefikServiceAccountName(gateway *gatewayv1alpha1.VPSGateway) string {
+	return fmt.Sprintf("traefik-%s", gateway.Name)
+}
+
+// reconcileTraefikService creates or updates the Traefik Service
+func (r *VPSGatewayReconciler) reconcileTraefikService(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	logger := log.FromContext(ctx)
+
+	namespace := r.getResourceNamespace(gateway)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      r.getTraefikServiceName(gateway),
+			Namespace: namespace,
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
+		labels := r.getTraefikLabels(gateway)
+
+		service.Labels = labels
+		service.Spec.Selector = labels
+		service.Spec.Type = corev1.ServiceTypeClusterIP
+
+		// Set ports
+		service.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:       "web",
+				Port:       int32(httpPort),
+				TargetPort: intstr.FromString("web"),
+				Protocol:   corev1.ProtocolTCP,
+			},
+			{
+				Name:       "websecure",
+				Port:       int32(httpsPort),
+				TargetPort: intstr.FromString("websecure"),
+				Protocol:   corev1.ProtocolTCP,
+			},
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		logger.Error(err, "Failed to reconcile Traefik Service")
+		return err
+	}
+
+	switch op {
+	case controllerutil.OperationResultCreated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonTraefikServiceCreated,
+			fmt.Sprintf("Traefik Service %s/%s created", namespace, service.Name))
+		logger.Info("Traefik Service created", "name", service.Name, "namespace", namespace)
+	case controllerutil.OperationResultUpdated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonTraefikServiceUpdated,
+			fmt.Sprintf("Traefik Service %s/%s updated", namespace, service.Name))
+		logger.Info("Traefik Service updated", "name", service.Name, "namespace", namespace)
+	}
+
+	return nil
+}
+
+// reconcileTraefikServiceAccount creates or updates the ServiceAccount for Traefik
+func (r *VPSGatewayReconciler) reconcileTraefikServiceAccount(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	logger := log.FromContext(ctx)
+
+	namespace := r.getResourceNamespace(gateway)
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      r.getTraefikServiceAccountName(gateway),
+			Namespace: namespace,
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
+		sa.Labels = r.getTraefikLabels(gateway)
+		return nil
+	})
+
+	if err != nil {
+		logger.Error(err, "Failed to reconcile Traefik ServiceAccount")
+		return err
+	}
+
+	switch op {
+	case controllerutil.OperationResultCreated:
+		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonTraefikServiceAccountCreated,
+			fmt.Sprintf("Traefik ServiceAccount %s/%s created", namespace, sa.Name))
+		logger.Info("Traefik ServiceAccount created", "name", sa.Name, "namespace", namespace)
+	case controllerutil.OperationResultUpdated:
+		logger.Info("Traefik ServiceAccount updated", "name", sa.Name, "namespace", namespace)
+	}
+
+	return nil
+}
+
+// isTraefikReady checks if the Traefik deployment is ready
+func (r *VPSGatewayReconciler) isTraefikReady(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) (bool, error) {
+	deployment := &appsv1.Deployment{}
+	deploymentName := types.NamespacedName{
+		Name:      r.getTraefikDeploymentName(gateway),
+		Namespace: r.getResourceNamespace(gateway),
+	}
+
+	if err := r.Get(ctx, deploymentName, deployment); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if deployment.Spec.Replicas == nil {
+		return false, nil
+	}
+
+	// Check for deployment failure conditions
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type == appsv1.DeploymentProgressing {
+			if condition.Status == corev1.ConditionFalse && condition.Reason == "ProgressDeadlineExceeded" {
+				return false, fmt.Errorf("traefik deployment %s has failed to progress: %s", deploymentName.Name, condition.Message)
+			}
+		}
+		if condition.Type == appsv1.DeploymentReplicaFailure {
+			if condition.Status == corev1.ConditionTrue {
+				return false, fmt.Errorf("traefik deployment %s has replica failure: %s", deploymentName.Name, condition.Message)
+			}
+		}
+	}
+
+	// Check if deployment has desired replicas available
+	if deployment.Status.ObservedGeneration == deployment.Generation &&
+		deployment.Status.ReadyReplicas == *deployment.Spec.Replicas &&
+		deployment.Status.Replicas == *deployment.Spec.Replicas &&
+		deployment.Status.UpdatedReplicas == *deployment.Spec.Replicas {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// deleteTraefikResourcesIfExists deletes all Traefik resources if they exist
+func (r *VPSGatewayReconciler) deleteTraefikResourcesIfExists(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	namespace := r.getResourceNamespace(gateway)
+
+	// Delete Service
+	service := &corev1.Service{}
+	serviceName := types.NamespacedName{
+		Name:      r.getTraefikServiceName(gateway),
+		Namespace: namespace,
+	}
+	if err := r.Get(ctx, serviceName, service); err == nil {
+		if err := r.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	// Delete Deployment
+	deployment := &appsv1.Deployment{}
+	deploymentName := types.NamespacedName{
+		Name:      r.getTraefikDeploymentName(gateway),
+		Namespace: namespace,
+	}
+	if err := r.Get(ctx, deploymentName, deployment); err == nil {
+		if err := r.Delete(ctx, deployment); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	// Delete ConfigMap
+	configMap := &corev1.ConfigMap{}
+	configMapName := types.NamespacedName{
+		Name:      r.getTraefikConfigMapName(gateway),
+		Namespace: namespace,
+	}
+	if err := r.Get(ctx, configMapName, configMap); err == nil {
+		if err := r.Delete(ctx, configMap); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	// Delete ServiceAccount
+	sa := &corev1.ServiceAccount{}
+	saName := types.NamespacedName{
+		Name:      r.getTraefikServiceAccountName(gateway),
+		Namespace: namespace,
+	}
+	if err := r.Get(ctx, saName, sa); err == nil {
+		if err := r.Delete(ctx, sa); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	return nil
 }

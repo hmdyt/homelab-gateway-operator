@@ -22,6 +22,7 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,12 @@ const (
 	testNamespace      = "default"
 	testFRPToken       = "e2e-test-token"
 	mockFRPSNamespace  = "frps-mock"
+
+	// Traffic flow test constants
+	trafficTestGatewayName = "e2e-traffic-gateway"
+	trafficTestIngressName = "e2e-traffic-ingress"
+	trafficTestDomain      = "traffic-test.example.com"
+	trafficTestBackendName = "e2e-backend"
 )
 
 var _ = Describe("Manager", Ordered, func() {
@@ -311,6 +318,7 @@ metadata:
 data:
   frps.toml: |
     bindPort = 7000
+    vhostHTTPPort = 8080
     auth.token = "%s"
 ---
 apiVersion: apps/v1
@@ -333,6 +341,7 @@ spec:
         image: snowdreamtech/frps:0.53.2
         ports:
         - containerPort: 7000
+        - containerPort: 8080
         volumeMounts:
         - name: config
           mountPath: /etc/frp
@@ -350,8 +359,12 @@ spec:
   selector:
     app: frps
   ports:
-  - port: 7000
+  - name: control
+    port: 7000
     targetPort: 7000
+  - name: http
+    port: 8080
+    targetPort: 8080
 `, mockFRPSNamespace, testFRPToken, mockFRPSNamespace, mockFRPSNamespace)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
@@ -888,6 +901,237 @@ spec:
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "ingress", ingressName, "-n", testNamespace)
 			_, _ = utils.Run(cmd)
+		})
+	})
+
+	Context("トラフィックフロー", Ordered, func() {
+		BeforeAll(func() {
+			By("FRPトークン用のSecretを作成")
+			secretYAML := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s-traffic
+  namespace: %s
+type: Opaque
+stringData:
+  token: "%s"
+`, testSecretName, testNamespace, testFRPToken)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(secretYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("トラフィックフローテスト用のVPSGatewayを作成")
+			vpsGatewayYAML := fmt.Sprintf(`apiVersion: gateway.hmdyt.github.io/v1alpha1
+kind: VPSGateway
+metadata:
+  name: %s
+spec:
+  vps:
+    address: "%s"
+  frp:
+    port: 7000
+    tokenSecretRef:
+      name: %s-traffic
+      namespace: %s
+  ingress:
+    enabled: true
+    tls:
+      enabled: false
+    dns:
+      enabled: false
+`, trafficTestGatewayName, mockFRPSAddress, testSecretName, testNamespace)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(vpsGatewayYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("VPSGatewayがReadyになるまで待機")
+			verifyReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "vpsgateway", trafficTestGatewayName,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Ready"))
+			}
+			Eventually(verifyReady).Should(Succeed())
+
+			By("バックエンドPodとServiceを作成")
+			backendYAML := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app: %s
+spec:
+  containers:
+  - name: nginx
+    image: nginx:alpine
+    ports:
+    - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  selector:
+    app: %s
+  ports:
+  - port: 80
+    targetPort: 80
+`, trafficTestBackendName, testNamespace, trafficTestBackendName,
+				trafficTestBackendName, testNamespace, trafficTestBackendName)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(backendYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("バックエンドPodがReadyになるまで待機")
+			verifyBackendReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", trafficTestBackendName, "-n", testNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Running"))
+			}
+			Eventually(verifyBackendReady, 2*time.Minute, time.Second).Should(Succeed())
+
+			By("トラフィックフローテスト用のIngressを作成")
+			ingressYAML := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  ingressClassName: vps-gateway-%s
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: %s
+                port:
+                  number: 80
+`, trafficTestIngressName, testNamespace, trafficTestGatewayName, trafficTestDomain, trafficTestBackendName)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(ingressYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("frpc ConfigMapにドメインが反映されるまで待機")
+			expectedConfigMapName := fmt.Sprintf("frpc-config-%s", trafficTestGatewayName)
+			verifyConfigMapDomain := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", expectedConfigMapName, "-n", testNamespace,
+					"-o", "jsonpath={.data['frpc\\.toml']}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring(trafficTestDomain))
+			}
+			Eventually(verifyConfigMapDomain).Should(Succeed())
+
+			By("frpc DeploymentがReadyになるまで待機")
+			frpcDeploymentName := fmt.Sprintf("frpc-%s", trafficTestGatewayName)
+			verifyFRPCReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", frpcDeploymentName, "-n", testNamespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}
+			Eventually(verifyFRPCReady, 2*time.Minute, time.Second).Should(Succeed())
+
+			By("Traefik DeploymentがReadyになるまで待機")
+			traefikDeploymentName := fmt.Sprintf("traefik-%s", trafficTestGatewayName)
+			verifyTraefikReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", traefikDeploymentName, "-n", testNamespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}
+			Eventually(verifyTraefikReady, 2*time.Minute, time.Second).Should(Succeed())
+
+			// Wait for frpc Pod to restart after ConfigMap update (triggered by Ingress creation)
+			// The ConfigMap update causes the Deployment to rolling restart due to config-hash annotation
+			By("frpc Podが新しい設定で再起動するまで待機")
+			time.Sleep(3 * time.Second) // Give time for controller to update ConfigMap
+
+			// Wait for the new frpc Pod to be ready after restart
+			verifyFRPCReadyAfterRestart := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", frpcDeploymentName, "-n", testNamespace,
+					"-o", "jsonpath={.status.updatedReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+
+				cmd = exec.Command("kubectl", "get", "deployment", frpcDeploymentName, "-n", testNamespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}
+			Eventually(verifyFRPCReadyAfterRestart, 2*time.Minute, time.Second).Should(Succeed())
+
+			// Give time for frpc to establish connection to frps and register proxies
+			By("frpcがfrpsに接続するまで待機")
+			time.Sleep(10 * time.Second)
+		})
+
+		AfterAll(func() {
+			By("トラフィックフローテストのリソースをクリーンアップ")
+			cmd := exec.Command("kubectl", "delete", "ingress", trafficTestIngressName, "-n", testNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pod", trafficTestBackendName, "-n", testNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "service", trafficTestBackendName, "-n", testNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "vpsgateway", trafficTestGatewayName, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "secret", fmt.Sprintf("%s-traffic", testSecretName), "-n", testNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("curl -> frps -> frpc -> traefik -> pod の経路でトラフィックが流れること", func() {
+			By("kubectl port-forward を開始")
+			portForwardCmd := exec.Command("kubectl", "port-forward", "-n", mockFRPSNamespace, "svc/frps", "18080:8080")
+			err := portForwardCmd.Start()
+			Expect(err).NotTo(HaveOccurred())
+			defer portForwardCmd.Process.Kill()
+
+			// port-forward が ready になるまで少し待つ
+			time.Sleep(2 * time.Second)
+
+			By("frps 経由で HTTP リクエストを送信")
+			client := &http.Client{
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse // リダイレクトを追跡しない
+				},
+				Timeout: 10 * time.Second,
+			}
+
+			req, err := http.NewRequest("GET", "http://localhost:18080/", nil)
+			Expect(err).NotTo(HaveOccurred())
+			req.Host = trafficTestDomain
+
+			resp, err := client.Do(req)
+			Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+
+			By("トラフィックフローが成功したことを確認")
+			// HTTP 200: 直接成功、または HTTP 301 + HTTPS リダイレクト: Traefik まで到達
+			success := resp.StatusCode == http.StatusOK ||
+				(resp.StatusCode == http.StatusMovedPermanently &&
+					strings.Contains(resp.Header.Get("Location"), "https://"+trafficTestDomain))
+			Expect(success).To(BeTrue(), "Expected HTTP 200 or 301 with HTTPS redirect, got status %d", resp.StatusCode)
 		})
 	})
 })

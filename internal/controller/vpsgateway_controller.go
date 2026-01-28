@@ -61,6 +61,15 @@ const (
 	EventReasonIngressClassCreated = "IngressClassCreated"
 	EventReasonIngressClassUpdated = "IngressClassUpdated"
 
+	// Traefik event reasons
+	EventReasonTraefikConfigMapCreated      = "TraefikConfigMapCreated"
+	EventReasonTraefikConfigMapUpdated      = "TraefikConfigMapUpdated"
+	EventReasonTraefikDeploymentCreated     = "TraefikDeploymentCreated"
+	EventReasonTraefikDeploymentUpdated     = "TraefikDeploymentUpdated"
+	EventReasonTraefikServiceCreated        = "TraefikServiceCreated"
+	EventReasonTraefikServiceUpdated        = "TraefikServiceUpdated"
+	EventReasonTraefikServiceAccountCreated = "TraefikServiceAccountCreated"
+
 	// Default namespace for frpc deployment when not specified
 	defaultFrpcNamespace = "vps-gateway-system"
 )
@@ -77,6 +86,7 @@ type VPSGatewayReconciler struct {
 // +kubebuilder:rbac:groups=gateway.hmdyt.github.io,resources=vpsgateways/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
@@ -105,14 +115,8 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// 3. Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(gateway, vpsGatewayFinalizer) {
-		controllerutil.AddFinalizer(gateway, vpsGatewayFinalizer)
-		if err := r.Update(ctx, gateway); err != nil {
-			logger.Error(err, "Failed to add finalizer")
-			return ctrl.Result{}, err
-		}
-		// Return and requeue to process with updated resource
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	if result, err, done := r.ensureFinalizer(ctx, gateway); done {
+		return result, err
 	}
 
 	// 4. Initialize status if needed
@@ -124,40 +128,16 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// 5. Verify Secret exists (early validation)
-	_, err := r.getTokenFromSecret(ctx, gateway)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			notFoundErr := fmt.Errorf("secret %s not found in namespace %s",
-				gateway.Spec.FRP.TokenSecretRef.Name, gateway.Spec.FRP.TokenSecretRef.Namespace)
-			r.Recorder.Event(gateway, corev1.EventTypeWarning, EventReasonSecretNotFound, notFoundErr.Error())
-			return r.handleReconcileError(ctx, gateway, gatewayv1alpha1.ReasonSecretNotFound, notFoundErr)
-		}
-		var keyNotFoundErr *SecretKeyNotFoundError
-		if errors.As(err, &keyNotFoundErr) {
-			r.Recorder.Event(gateway, corev1.EventTypeWarning, "SecretKeyNotFound", err.Error())
-			return r.handleReconcileError(ctx, gateway, gatewayv1alpha1.ReasonSecretKeyNotFound, err)
-		}
-		return r.handleReconcileError(ctx, gateway, "SecretVerificationFailed", err)
+	if result, err, done := r.reconcileSecret(ctx, gateway); done {
+		return result, err
 	}
 
-	// Update condition: SecretFound
-	r.setCondition(gateway, gatewayv1alpha1.ConditionTypeSecretFound, metav1.ConditionTrue,
-		"SecretFound", "Token secret found and accessible")
+	// 6. Reconcile IngressClass
+	r.reconcileIngressClassStatus(ctx, gateway)
 
-	// 6. Reconcile IngressClass (if ingress is enabled)
-	if gateway.Spec.Ingress.Enabled {
-		if err := r.reconcileIngressClass(ctx, gateway); err != nil {
-			return r.handleReconcileError(ctx, gateway, "IngressClassFailed", err)
-		}
-		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressClassReady, metav1.ConditionTrue,
-			gatewayv1alpha1.ReasonAvailable, "IngressClass created and up-to-date")
-	} else {
-		// Clean up IngressClass if disabled
-		if err := r.deleteIngressClassIfExists(ctx, gateway); err != nil {
-			logger.Error(err, "Failed to delete IngressClass")
-		}
-		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressClassReady, metav1.ConditionFalse,
-			"IngressDisabled", "Ingress is disabled")
+	// 6.5. Reconcile Traefik resources
+	if result, err, done := r.reconcileTraefikResources(ctx, gateway); done {
+		return result, err
 	}
 
 	// 7. Collect domains from Ingresses and update status
@@ -172,15 +152,128 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.handleReconcileError(ctx, gateway, "ConfigMapFailed", err)
 	}
 
-	// 9. Reconcile Deployment
-	if err := r.reconcileDeployment(ctx, gateway); err != nil {
-		return r.handleReconcileError(ctx, gateway, "DeploymentFailed", err)
+	// 9. Reconcile frpc Deployment
+	if result, err, done := r.reconcileFRPCDeployment(ctx, gateway); done {
+		return result, err
 	}
 
-	// Check deployment readiness
+	// 10. Reconcile Egress Service
+	r.reconcileEgressService(ctx, gateway)
+
+	// 11. Update final status to Ready
+	return r.finishReconcile(ctx, gateway)
+}
+
+// ensureFinalizer adds finalizer if not present
+func (r *VPSGatewayReconciler) ensureFinalizer(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) (ctrl.Result, error, bool) {
+	if !controllerutil.ContainsFinalizer(gateway, vpsGatewayFinalizer) {
+		controllerutil.AddFinalizer(gateway, vpsGatewayFinalizer)
+		if err := r.Update(ctx, gateway); err != nil {
+			log.FromContext(ctx).Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err, true
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+	}
+	return ctrl.Result{}, nil, false
+}
+
+// reconcileSecret verifies Secret exists and is accessible
+func (r *VPSGatewayReconciler) reconcileSecret(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) (ctrl.Result, error, bool) {
+	_, err := r.getTokenFromSecret(ctx, gateway)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			notFoundErr := fmt.Errorf("secret %s not found in namespace %s",
+				gateway.Spec.FRP.TokenSecretRef.Name, gateway.Spec.FRP.TokenSecretRef.Namespace)
+			r.Recorder.Event(gateway, corev1.EventTypeWarning, EventReasonSecretNotFound, notFoundErr.Error())
+			result, err := r.handleReconcileError(ctx, gateway, gatewayv1alpha1.ReasonSecretNotFound, notFoundErr)
+			return result, err, true
+		}
+		var keyNotFoundErr *SecretKeyNotFoundError
+		if errors.As(err, &keyNotFoundErr) {
+			r.Recorder.Event(gateway, corev1.EventTypeWarning, "SecretKeyNotFound", err.Error())
+			result, err := r.handleReconcileError(ctx, gateway, gatewayv1alpha1.ReasonSecretKeyNotFound, err)
+			return result, err, true
+		}
+		result, err := r.handleReconcileError(ctx, gateway, "SecretVerificationFailed", err)
+		return result, err, true
+	}
+	r.setCondition(gateway, gatewayv1alpha1.ConditionTypeSecretFound, metav1.ConditionTrue,
+		"SecretFound", "Token secret found and accessible")
+	return ctrl.Result{}, nil, false
+}
+
+// reconcileIngressClassStatus reconciles IngressClass and updates status
+func (r *VPSGatewayReconciler) reconcileIngressClassStatus(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) {
+	logger := log.FromContext(ctx)
+	if gateway.Spec.Ingress.Enabled {
+		if err := r.reconcileIngressClass(ctx, gateway); err != nil {
+			logger.Error(err, "Failed to reconcile IngressClass")
+		}
+		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressClassReady, metav1.ConditionTrue,
+			gatewayv1alpha1.ReasonAvailable, "IngressClass created and up-to-date")
+	} else {
+		if err := r.deleteIngressClassIfExists(ctx, gateway); err != nil {
+			logger.Error(err, "Failed to delete IngressClass")
+		}
+		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressClassReady, metav1.ConditionFalse,
+			"IngressDisabled", "Ingress is disabled")
+	}
+}
+
+// reconcileTraefikResources reconciles all Traefik-related resources
+func (r *VPSGatewayReconciler) reconcileTraefikResources(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) (ctrl.Result, error, bool) {
+	logger := log.FromContext(ctx)
+	if gateway.Spec.Ingress.Enabled && gateway.Spec.Ingress.Controller.Enabled {
+		if err := r.reconcileTraefikServiceAccount(ctx, gateway); err != nil {
+			result, e := r.handleReconcileError(ctx, gateway, "TraefikServiceAccountFailed", err)
+			return result, e, true
+		}
+		if err := r.reconcileTraefikConfigMap(ctx, gateway); err != nil {
+			result, e := r.handleReconcileError(ctx, gateway, "TraefikConfigMapFailed", err)
+			return result, e, true
+		}
+		if err := r.reconcileTraefikDeployment(ctx, gateway); err != nil {
+			result, e := r.handleReconcileError(ctx, gateway, "TraefikDeploymentFailed", err)
+			return result, e, true
+		}
+		if err := r.reconcileTraefikService(ctx, gateway); err != nil {
+			result, e := r.handleReconcileError(ctx, gateway, "TraefikServiceFailed", err)
+			return result, e, true
+		}
+		traefikReady, err := r.isTraefikReady(ctx, gateway)
+		if err != nil {
+			result, e := r.handleReconcileError(ctx, gateway, "TraefikCheckFailed", err)
+			return result, e, true
+		}
+		gateway.Status.IngressControllerReady = traefikReady
+		if traefikReady {
+			r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressControllerReady, metav1.ConditionTrue,
+				gatewayv1alpha1.ReasonAvailable, "Traefik deployment is ready")
+		} else {
+			r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressControllerReady, metav1.ConditionFalse,
+				gatewayv1alpha1.ReasonReconciling, "Traefik deployment is not yet ready")
+		}
+	} else {
+		if err := r.deleteTraefikResourcesIfExists(ctx, gateway); err != nil {
+			logger.Error(err, "Failed to delete Traefik resources")
+		}
+		gateway.Status.IngressControllerReady = false
+		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeIngressControllerReady, metav1.ConditionFalse,
+			"IngressControllerDisabled", "Ingress controller is disabled")
+	}
+	return ctrl.Result{}, nil, false
+}
+
+// reconcileFRPCDeployment reconciles the frpc Deployment
+func (r *VPSGatewayReconciler) reconcileFRPCDeployment(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) (ctrl.Result, error, bool) {
+	if err := r.reconcileDeployment(ctx, gateway); err != nil {
+		result, err := r.handleReconcileError(ctx, gateway, "DeploymentFailed", err)
+		return result, err, true
+	}
 	deploymentReady, err := r.isDeploymentReady(ctx, gateway)
 	if err != nil {
-		return r.handleReconcileError(ctx, gateway, "DeploymentCheckFailed", err)
+		result, err := r.handleReconcileError(ctx, gateway, "DeploymentCheckFailed", err)
+		return result, err, true
 	}
 	gateway.Status.FRPCReady = deploymentReady
 	if deploymentReady {
@@ -189,23 +282,25 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	} else {
 		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeFRPCReady, metav1.ConditionFalse,
 			gatewayv1alpha1.ReasonReconciling, "Deployment is not yet ready")
-		// Requeue to check deployment status again
 		if err := r.Status().Update(ctx, gateway); err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, err, true
 		}
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
 	}
+	return ctrl.Result{}, nil, false
+}
 
-	// 10. Reconcile Service (if egress is enabled)
+// reconcileEgressService reconciles the Egress Service
+func (r *VPSGatewayReconciler) reconcileEgressService(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) {
+	logger := log.FromContext(ctx)
 	if gateway.Spec.Egress.Enabled {
 		if err := r.reconcileService(ctx, gateway); err != nil {
-			return r.handleReconcileError(ctx, gateway, "ServiceFailed", err)
+			logger.Error(err, "Failed to reconcile egress service")
 		}
 		gateway.Status.EgressProxyReady = true
 		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeEgressProxyReady, metav1.ConditionTrue,
 			gatewayv1alpha1.ReasonAvailable, "Egress service created and up-to-date")
 	} else {
-		// Clean up service if egress is disabled
 		if err := r.deleteServiceIfExists(ctx, gateway); err != nil {
 			logger.Error(err, "Failed to delete service")
 		}
@@ -213,8 +308,11 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		r.setCondition(gateway, gatewayv1alpha1.ConditionTypeEgressProxyReady, metav1.ConditionFalse,
 			gatewayv1alpha1.ReasonEgressDisabled, "Egress is disabled")
 	}
+}
 
-	// 11. Update final status to Ready
+// finishReconcile updates final status and returns
+func (r *VPSGatewayReconciler) finishReconcile(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 	gateway.Status.Phase = gatewayv1alpha1.VPSGatewayPhaseReady
 	now := metav1.Now()
 	gateway.Status.LastSyncTime = &now
@@ -231,7 +329,6 @@ func (r *VPSGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"Successfully reconciled VPSGateway")
 	logger.Info("Reconciliation complete", "phase", gateway.Status.Phase)
 
-	// Requeue after success interval for periodic health checks
 	return ctrl.Result{RequeueAfter: requeueAfterSuccess}, nil
 }
 

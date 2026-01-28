@@ -20,6 +20,10 @@ spec:
   ingress:
     enabled: true
     # ingressClassName: "vps-gateway-main"  # Optional: defaults to "vps-gateway-{name}"
+    controller:
+      enabled: true  # Optional: defaults to true (manages Traefik deployment)
+      image: "traefik:v3.2"  # Optional: Traefik container image
+      replicas: 1  # Optional: number of Traefik replicas
     tls:
       enabled: true  # Optional: defaults to true
       issuer: "letsencrypt-prod"  # Optional: defaults to "letsencrypt-prod"
