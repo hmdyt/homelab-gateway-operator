@@ -17,6 +17,7 @@
             go
             kind
             kubebuilder
+            kubernetes-helm
           ];
         };
       }
