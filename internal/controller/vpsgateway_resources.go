@@ -26,6 +26,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1064,9 +1065,166 @@ func (r *VPSGatewayReconciler) isTraefikReady(ctx context.Context, gateway *gate
 	return false, nil
 }
 
+// getTraefikClusterRoleName returns the ClusterRole name for Traefik
+func (r *VPSGatewayReconciler) getTraefikClusterRoleName(gateway *gatewayv1alpha1.VPSGateway) string {
+	return fmt.Sprintf("traefik-%s-%s", gateway.Namespace, gateway.Name)
+}
+
+// getTraefikClusterRoleBindingName returns the ClusterRoleBinding name for Traefik
+func (r *VPSGatewayReconciler) getTraefikClusterRoleBindingName(gateway *gatewayv1alpha1.VPSGateway) string {
+	return fmt.Sprintf("traefik-%s-%s", gateway.Namespace, gateway.Name)
+}
+
+// getTraefikClusterRoleLabels returns labels for cluster-scoped Traefik RBAC resources
+func (r *VPSGatewayReconciler) getTraefikClusterRoleLabels(gateway *gatewayv1alpha1.VPSGateway) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/managed-by":              "homelab-gateway-operator",
+		"gateway.hmdyt.github.io/gateway-name":      gateway.Name,
+		"gateway.hmdyt.github.io/gateway-namespace": gateway.Namespace,
+	}
+}
+
+// reconcileTraefikClusterRole creates or updates the ClusterRole for Traefik
+func (r *VPSGatewayReconciler) reconcileTraefikClusterRole(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	logger := log.FromContext(ctx)
+
+	clusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: r.getTraefikClusterRoleName(gateway),
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, clusterRole, func() error {
+		clusterRole.Labels = r.getTraefikClusterRoleLabels(gateway)
+		clusterRole.Rules = []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"services", "secrets"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"networking.k8s.io"},
+				Resources: []string{"ingresses", "ingressclasses"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"networking.k8s.io"},
+				Resources: []string{"ingresses/status"},
+				Verbs:     []string{"update"},
+			},
+			{
+				APIGroups: []string{"discovery.k8s.io"},
+				Resources: []string{"endpointslices"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+		}
+		// Note: ClusterRole is cluster-scoped, so we cannot set OwnerReference
+		return nil
+	})
+
+	if err != nil {
+		logger.Error(err, "Failed to reconcile Traefik ClusterRole")
+		return err
+	}
+
+	switch op {
+	case controllerutil.OperationResultCreated:
+		logger.Info("Traefik ClusterRole created", "name", clusterRole.Name)
+	case controllerutil.OperationResultUpdated:
+		logger.Info("Traefik ClusterRole updated", "name", clusterRole.Name)
+	}
+
+	return nil
+}
+
+// reconcileTraefikClusterRoleBinding creates or updates the ClusterRoleBinding for Traefik
+func (r *VPSGatewayReconciler) reconcileTraefikClusterRoleBinding(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	logger := log.FromContext(ctx)
+
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: r.getTraefikClusterRoleBindingName(gateway),
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, binding, func() error {
+		binding.Labels = r.getTraefikClusterRoleLabels(gateway)
+		binding.RoleRef = rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     r.getTraefikClusterRoleName(gateway),
+		}
+		binding.Subjects = []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      r.getTraefikServiceAccountName(gateway),
+				Namespace: gateway.Namespace,
+			},
+		}
+		// Note: ClusterRoleBinding is cluster-scoped, so we cannot set OwnerReference
+		return nil
+	})
+
+	if err != nil {
+		logger.Error(err, "Failed to reconcile Traefik ClusterRoleBinding")
+		return err
+	}
+
+	switch op {
+	case controllerutil.OperationResultCreated:
+		logger.Info("Traefik ClusterRoleBinding created", "name", binding.Name)
+	case controllerutil.OperationResultUpdated:
+		logger.Info("Traefik ClusterRoleBinding updated", "name", binding.Name)
+	}
+
+	return nil
+}
+
+// deleteTraefikClusterRBACResources deletes cluster-scoped RBAC resources for Traefik
+func (r *VPSGatewayReconciler) deleteTraefikClusterRBACResources(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
+	logger := log.FromContext(ctx)
+
+	// Delete ClusterRoleBinding
+	binding := &rbacv1.ClusterRoleBinding{}
+	bindingName := types.NamespacedName{
+		Name: r.getTraefikClusterRoleBindingName(gateway),
+	}
+	if err := r.Get(ctx, bindingName, binding); err == nil {
+		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete Traefik ClusterRoleBinding", "name", bindingName.Name)
+			return err
+		}
+		logger.Info("Traefik ClusterRoleBinding deleted", "name", bindingName.Name)
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	// Delete ClusterRole
+	clusterRole := &rbacv1.ClusterRole{}
+	clusterRoleName := types.NamespacedName{
+		Name: r.getTraefikClusterRoleName(gateway),
+	}
+	if err := r.Get(ctx, clusterRoleName, clusterRole); err == nil {
+		if err := r.Delete(ctx, clusterRole); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete Traefik ClusterRole", "name", clusterRoleName.Name)
+			return err
+		}
+		logger.Info("Traefik ClusterRole deleted", "name", clusterRoleName.Name)
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	return nil
+}
+
 // deleteTraefikResourcesIfExists deletes all Traefik resources if they exist
 func (r *VPSGatewayReconciler) deleteTraefikResourcesIfExists(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
 	namespace := r.getResourceNamespace(gateway)
+
+	// Delete cluster-scoped RBAC resources first
+	if err := r.deleteTraefikClusterRBACResources(ctx, gateway); err != nil {
+		return err
+	}
 
 	// Delete Service
 	service := &corev1.Service{}

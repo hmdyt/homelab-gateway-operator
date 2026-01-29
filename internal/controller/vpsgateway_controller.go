@@ -85,6 +85,8 @@ type VPSGatewayReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile implements the main reconciliation logic
@@ -201,6 +203,14 @@ func (r *VPSGatewayReconciler) reconcileTraefikResources(ctx context.Context, ga
 			result, e := r.handleReconcileError(ctx, gateway, "TraefikServiceAccountFailed", err)
 			return result, e, true
 		}
+		if err := r.reconcileTraefikClusterRole(ctx, gateway); err != nil {
+			result, e := r.handleReconcileError(ctx, gateway, "TraefikClusterRoleFailed", err)
+			return result, e, true
+		}
+		if err := r.reconcileTraefikClusterRoleBinding(ctx, gateway); err != nil {
+			result, e := r.handleReconcileError(ctx, gateway, "TraefikClusterRoleBindingFailed", err)
+			return result, e, true
+		}
 		if err := r.reconcileTraefikConfigMap(ctx, gateway); err != nil {
 			result, e := r.handleReconcileError(ctx, gateway, "TraefikConfigMapFailed", err)
 			return result, e, true
@@ -311,7 +321,12 @@ func (r *VPSGatewayReconciler) reconcileDelete(ctx context.Context, gateway *gat
 	logger.Info("Handling deletion")
 
 	if controllerutil.ContainsFinalizer(gateway, vpsGatewayFinalizer) {
-		// Perform cleanup if needed (resources will be garbage collected via owner references)
+		// Clean up cluster-scoped RBAC resources (they don't have OwnerReference)
+		if err := r.deleteTraefikClusterRBACResources(ctx, gateway); err != nil {
+			logger.Error(err, "Failed to delete Traefik cluster RBAC resources")
+			return ctrl.Result{}, err
+		}
+
 		logger.Info("Cleanup complete, removing finalizer")
 
 		controllerutil.RemoveFinalizer(gateway, vpsGatewayFinalizer)
