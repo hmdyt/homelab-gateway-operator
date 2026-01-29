@@ -58,6 +58,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - externaldns.k8s.io
   resources:
   - dnsendpoints
@@ -98,11 +106,18 @@ rules:
 - apiGroups:
   - networking.k8s.io
   resources:
+  - ingressclasses
   - ingresses
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses/status
+  verbs:
+  - update
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
