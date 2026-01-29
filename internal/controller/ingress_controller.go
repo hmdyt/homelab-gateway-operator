@@ -31,10 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
 	"sigs.k8s.io/external-dns/endpoint"
@@ -344,8 +346,11 @@ func (r *IngressReconciler) deleteCertificateIfExists(ctx context.Context, ingre
 func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkingv1.Ingress{}).
-		Owns(&externaldnsv1alpha1.DNSEndpoint{}).
-		Owns(&certmanagerv1.Certificate{}).
+		// Use GenerationChangedPredicate to avoid reconcile loops caused by status-only updates.
+		// Without this predicate, external-dns and cert-manager status updates would trigger
+		// Ingress reconciliation, causing an infinite loop.
+		Owns(&externaldnsv1alpha1.DNSEndpoint{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Owns(&certmanagerv1.Certificate{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
 			&gatewayv1alpha1.VPSGateway{},
 			handler.EnqueueRequestsFromMapFunc(r.findIngressesForVPSGateway),
