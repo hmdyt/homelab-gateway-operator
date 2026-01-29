@@ -180,7 +180,7 @@ nix develop -c go build ./...
 nix develop -c make test
 
 # E2E テスト
-nix develop -c make e2e-test
+nix develop -c make test-e2e
 
 # DeepCopy コード生成
 nix develop -c make generate
