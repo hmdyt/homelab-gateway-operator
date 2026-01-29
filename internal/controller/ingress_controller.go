@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
@@ -45,9 +44,6 @@ import (
 )
 
 const (
-	// IngressClassPrefix is the prefix for generated IngressClass names
-	IngressClassPrefix = "vps-gateway-"
-
 	// Event reasons for Ingress reconciliation
 	EventReasonDNSEndpointCreated  = "DNSEndpointCreated"
 	EventReasonDNSEndpointUpdated  = "DNSEndpointUpdated"
@@ -86,17 +82,13 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	// 2. Check if IngressClass is managed by us (vps-gateway-*)
+	// 2. Check if IngressClassName is specified
 	if ingress.Spec.IngressClassName == nil {
 		logger.V(1).Info("Ingress has no IngressClassName, skipping")
 		return ctrl.Result{}, nil
 	}
 
 	ingressClassName := *ingress.Spec.IngressClassName
-	if !strings.HasPrefix(ingressClassName, IngressClassPrefix) {
-		logger.V(1).Info("Ingress is not managed by vps-gateway", "ingressClassName", ingressClassName)
-		return ctrl.Result{}, nil
-	}
 
 	// 3. Find the corresponding VPSGateway (across all namespaces)
 	gateway, err := r.findVPSGatewayByIngressClassName(ctx, ingressClassName)
@@ -412,8 +404,5 @@ func (r *IngressReconciler) findVPSGatewayByIngressClassName(ctx context.Context
 
 // getIngressClassName returns the IngressClass name for a VPSGateway
 func getIngressClassName(gateway *gatewayv1alpha1.VPSGateway) string {
-	if gateway.Spec.Ingress.IngressClassName != "" {
-		return gateway.Spec.Ingress.IngressClassName
-	}
-	return IngressClassPrefix + gateway.Name
+	return gateway.Spec.Ingress.IngressClassName
 }

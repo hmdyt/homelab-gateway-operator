@@ -168,9 +168,8 @@ spec:
                       be created
                     type: boolean
                   ingressClassName:
-                    description: |-
-                      IngressClassName is the name of the IngressClass to create
-                      Defaults to vps-gateway-{VPSGateway name}
+                    description: IngressClassName is the name of the IngressClass
+                      for Ingress matching
                     minLength: 1
                     type: string
                   tls:
@@ -188,6 +187,8 @@ spec:
                         minLength: 1
                         type: string
                     type: object
+                required:
+                - ingressClassName
                 type: object
               vps:
                 description: VPS defines the VPS server configuration

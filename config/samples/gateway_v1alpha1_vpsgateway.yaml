@@ -20,7 +20,7 @@ spec:
 
   ingress:
     enabled: true
-    ingressClassName: "vps-gateway"  # Required: IngressClass name (managed by Helm)
+    ingressClassName: "vps-gateway-main"  # Required: IngressClass name for Ingress matching
     customDomains:  # Optional: static domains to include in frpc config (merged with Ingress domains)
       - "*.example.com"
       - "*.app.example.com"

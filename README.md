@@ -155,7 +155,7 @@ spec:
 | `frp.tokenSecretRef.key` | Secret 内のトークンキー | `token` |
 | `frp.image` | frpc コンテナイメージ | `snowdreamtech/frpc:0.53.2` |
 | `ingress.enabled` | Ingress 管理を有効化 | `true` |
-| `ingress.ingressClassName` | IngressClass 名 | `vps-gateway-{name}` |
+| `ingress.ingressClassName` | IngressClass 名 | (必須) |
 | `ingress.customDomains` | 静的に追加するドメイン | `[]` |
 | `ingress.controller.enabled` | Traefik をデプロイ | `true` |
 | `ingress.controller.image` | Traefik イメージ | `traefik:v3.2` |

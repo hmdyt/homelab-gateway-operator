@@ -113,11 +113,10 @@ type IngressConfig struct {
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled"`
 
-	// IngressClassName is the name of the IngressClass to create
-	// Defaults to vps-gateway-{VPSGateway name}
-	// +optional
+	// IngressClassName is the name of the IngressClass for Ingress matching
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	IngressClassName string `json:"ingressClassName,omitempty"`
+	IngressClassName string `json:"ingressClassName"`
 
 	// CustomDomains is a list of static domains to include in frpc config
 	// These are merged with domains collected from Ingress resources
@@ -261,8 +260,6 @@ const (
 	ConditionTypeEgressProxyReady = "EgressProxyReady"
 	// ConditionTypeSecretFound indicates the token secret was found
 	ConditionTypeSecretFound = "SecretFound"
-	// ConditionTypeIngressClassReady indicates the IngressClass is ready
-	ConditionTypeIngressClassReady = "IngressClassReady"
 )
 
 // Condition reasons
