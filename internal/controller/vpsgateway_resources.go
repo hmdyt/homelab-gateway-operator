@@ -231,14 +231,20 @@ func (r *VPSGatewayReconciler) generateFrpcConfig(ctx context.Context, gateway *
 	return builder.String(), nil
 }
 
-// collectDomainsFromIngresses collects all unique domains from watched Ingresses
+// collectDomainsFromIngresses collects all unique domains from watched Ingresses and customDomains
 func (r *VPSGatewayReconciler) collectDomainsFromIngresses(gateway *gatewayv1alpha1.VPSGateway) []string {
 	domainSet := make(map[string]struct{})
 
+	// Collect from Ingress resources
 	for _, ingress := range gateway.Status.WatchedIngresses {
 		for _, domain := range ingress.Domains {
 			domainSet[domain] = struct{}{}
 		}
+	}
+
+	// Add static customDomains from spec
+	for _, domain := range gateway.Spec.Ingress.CustomDomains {
+		domainSet[domain] = struct{}{}
 	}
 
 	domains := make([]string, 0, len(domainSet))

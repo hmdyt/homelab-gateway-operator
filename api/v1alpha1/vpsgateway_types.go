@@ -119,6 +119,12 @@ type IngressConfig struct {
 	// +kubebuilder:validation:MinLength=1
 	IngressClassName string `json:"ingressClassName,omitempty"`
 
+	// CustomDomains is a list of static domains to include in frpc config
+	// These are merged with domains collected from Ingress resources
+	// Supports wildcard domains like "*.example.com"
+	// +optional
+	CustomDomains []string `json:"customDomains,omitempty"`
+
 	// Controller defines the Ingress Controller configuration
 	// +optional
 	Controller IngressControllerConfig `json:"controller,omitempty"`

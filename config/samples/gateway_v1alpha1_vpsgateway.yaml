@@ -21,6 +21,9 @@ spec:
   ingress:
     enabled: true
     ingressClassName: "vps-gateway"  # Required: IngressClass name (managed by Helm)
+    customDomains:  # Optional: static domains to include in frpc config (merged with Ingress domains)
+      - "*.example.com"
+      - "*.app.example.com"
     controller:
       enabled: true  # Optional: defaults to true (manages Traefik deployment)
       image: "traefik:v3.2"  # Optional: Traefik container image

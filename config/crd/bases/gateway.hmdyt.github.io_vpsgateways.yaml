@@ -139,6 +139,14 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  customDomains:
+                    description: |-
+                      CustomDomains is a list of static domains to include in frpc config
+                      These are merged with domains collected from Ingress resources
+                      Supports wildcard domains like "*.example.com"
+                    items:
+                      type: string
+                    type: array
                   dns:
                     description: DNS defines the DNS configuration for external-dns
                     properties:

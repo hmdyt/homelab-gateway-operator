@@ -120,4 +120,143 @@ var _ = Describe("VPSGateway Controller", func() {
 			Expect(configMap.OwnerReferences[0].Kind).To(Equal("VPSGateway"))
 		})
 	})
+
+	Context("When creating a VPSGateway with customDomains", func() {
+		const (
+			vpsGatewayName  = "test-gateway-custom"
+			secretName      = "test-frp-token-custom"
+			secretNamespace = "vps-gateway-system"
+			vpsAddress      = "192.168.1.101"
+		)
+
+		BeforeEach(func() {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      secretName,
+					Namespace: secretNamespace,
+				},
+				StringData: map[string]string{
+					"token": "test-token-value",
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).Should(Succeed())
+		})
+
+		AfterEach(func() {
+			gateway := &gatewayv1alpha1.VPSGateway{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName, Namespace: secretNamespace}, gateway)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, gateway)).Should(Succeed())
+			}
+
+			secret := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, secret)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, secret)).Should(Succeed())
+			}
+		})
+
+		It("should include customDomains in frpc config", func() {
+			By("Creating a VPSGateway with customDomains")
+			gateway := &gatewayv1alpha1.VPSGateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      vpsGatewayName,
+					Namespace: secretNamespace,
+				},
+				Spec: gatewayv1alpha1.VPSGatewaySpec{
+					VPS: gatewayv1alpha1.VPSConfig{
+						Address: vpsAddress,
+					},
+					FRP: gatewayv1alpha1.FRPConfig{
+						Port: 7000,
+						TokenSecretRef: gatewayv1alpha1.SecretReference{
+							Name:      secretName,
+							Namespace: secretNamespace,
+							Key:       "token",
+						},
+					},
+					Ingress: gatewayv1alpha1.IngressConfig{
+						Enabled:          true,
+						IngressClassName: "vps-gateway-custom",
+						CustomDomains: []string{
+							"*.yhmd.dev",
+							"*.coder.yhmd.dev",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, gateway)).Should(Succeed())
+
+			By("Checking if ConfigMap includes customDomains")
+			configMap := &corev1.ConfigMap{}
+			configMapName := "frpc-config-" + vpsGatewayName
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      configMapName,
+					Namespace: secretNamespace,
+				}, configMap)
+			}, timeout, interval).Should(Succeed())
+
+			Expect(configMap.Data).To(HaveKey("frpc.toml"))
+			Expect(configMap.Data["frpc.toml"]).To(ContainSubstring("*.yhmd.dev"))
+			Expect(configMap.Data["frpc.toml"]).To(ContainSubstring("*.coder.yhmd.dev"))
+		})
+
+		It("should deduplicate domains within customDomains", func() {
+			By("Creating a VPSGateway with duplicate customDomains")
+			gateway := &gatewayv1alpha1.VPSGateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      vpsGatewayName + "-dedup",
+					Namespace: secretNamespace,
+				},
+				Spec: gatewayv1alpha1.VPSGatewaySpec{
+					VPS: gatewayv1alpha1.VPSConfig{
+						Address: vpsAddress,
+					},
+					FRP: gatewayv1alpha1.FRPConfig{
+						Port: 7000,
+						TokenSecretRef: gatewayv1alpha1.SecretReference{
+							Name:      secretName,
+							Namespace: secretNamespace,
+							Key:       "token",
+						},
+					},
+					Ingress: gatewayv1alpha1.IngressConfig{
+						Enabled:          true,
+						IngressClassName: "vps-gateway-dedup",
+						CustomDomains: []string{
+							"example.com",
+							"example.com", // duplicate in customDomains
+							"test.example.com",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, gateway)).Should(Succeed())
+
+			// Clean up this gateway as well
+			defer func() {
+				gw := &gatewayv1alpha1.VPSGateway{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName + "-dedup", Namespace: secretNamespace}, gw)
+				if err == nil {
+					Expect(k8sClient.Delete(ctx, gw)).Should(Succeed())
+				}
+			}()
+
+			By("Checking if ConfigMap deduplicates domains")
+			configMap := &corev1.ConfigMap{}
+			configMapName := "frpc-config-" + vpsGatewayName + "-dedup"
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      configMapName,
+					Namespace: secretNamespace,
+				}, configMap)
+			}, timeout, interval).Should(Succeed())
+
+			Expect(configMap.Data).To(HaveKey("frpc.toml"))
+			// Domains should be sorted and deduplicated
+			config := configMap.Data["frpc.toml"]
+			Expect(config).To(ContainSubstring(`customDomains = ["example.com", "test.example.com"]`))
+		})
+	})
 })
