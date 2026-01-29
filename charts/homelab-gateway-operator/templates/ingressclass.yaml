@@ -1,0 +1,10 @@
+{{- if .Values.ingressClass.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: {{ .Values.ingressClass.name }}
+  labels:
+    {{- include "homelab-gateway-operator.labels" . | nindent 4 }}
+spec:
+  controller: traefik.io/ingress-controller
+{{- end }}

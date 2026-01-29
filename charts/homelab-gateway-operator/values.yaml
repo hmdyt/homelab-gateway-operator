@@ -45,3 +45,7 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+ingressClass:
+  enabled: true
+  name: vps-gateway

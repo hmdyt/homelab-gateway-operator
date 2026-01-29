@@ -23,7 +23,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -38,11 +37,10 @@ var _ = Describe("VPSGateway Controller", func() {
 
 	Context("When creating a VPSGateway", func() {
 		const (
-			vpsGatewayName   = "test-gateway"
-			secretName       = "test-frp-token"
-			secretNamespace  = "vps-gateway-system"
-			vpsAddress       = "192.168.1.100"
-			ingressClassName = "vps-gateway-test-gateway"
+			vpsGatewayName  = "test-gateway"
+			secretName      = "test-frp-token"
+			secretNamespace = "vps-gateway-system"
+			vpsAddress      = "192.168.1.100"
 		)
 
 		BeforeEach(func() {
@@ -60,9 +58,9 @@ var _ = Describe("VPSGateway Controller", func() {
 		})
 
 		AfterEach(func() {
-			// Clean up VPSGateway
+			// Clean up VPSGateway (namespace-scoped)
 			gateway := &gatewayv1alpha1.VPSGateway{}
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName}, gateway)
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName, Namespace: secretNamespace}, gateway)
 			if err == nil {
 				Expect(k8sClient.Delete(ctx, gateway)).Should(Succeed())
 			}
@@ -73,20 +71,14 @@ var _ = Describe("VPSGateway Controller", func() {
 			if err == nil {
 				Expect(k8sClient.Delete(ctx, secret)).Should(Succeed())
 			}
-
-			// Clean up IngressClass
-			ingressClass := &networkingv1.IngressClass{}
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: ingressClassName}, ingressClass)
-			if err == nil {
-				Expect(k8sClient.Delete(ctx, ingressClass)).Should(Succeed())
-			}
 		})
 
-		It("should create IngressClass when ingress is enabled", func() {
+		It("should create ConfigMap in the same namespace as VPSGateway", func() {
 			By("Creating a VPSGateway")
 			gateway := &gatewayv1alpha1.VPSGateway{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: vpsGatewayName,
+					Name:      vpsGatewayName,
+					Namespace: secretNamespace,
 				},
 				Spec: gatewayv1alpha1.VPSGatewaySpec{
 					VPS: gatewayv1alpha1.VPSConfig{
@@ -101,70 +93,14 @@ var _ = Describe("VPSGateway Controller", func() {
 						},
 					},
 					Ingress: gatewayv1alpha1.IngressConfig{
-						Enabled: true,
-						TLS: gatewayv1alpha1.IngressTLSConfig{
-							Enabled: true,
-							Issuer:  "letsencrypt-prod",
-						},
-						DNS: gatewayv1alpha1.DNSConfig{
-							Enabled: true,
-							TTL:     300,
-						},
+						Enabled:          true,
+						IngressClassName: "vps-gateway",
 					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, gateway)).Should(Succeed())
 
-			By("Checking if IngressClass is created")
-			ingressClass := &networkingv1.IngressClass{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: ingressClassName}, ingressClass)
-			}, timeout, interval).Should(Succeed())
-
-			Expect(ingressClass.Spec.Controller).To(Equal("traefik.io/ingress-controller"))
-			Expect(ingressClass.Annotations["gateway.hmdyt.github.io/vps-address"]).To(Equal(vpsAddress))
-
-			By("Checking VPSGateway has IngressClassReady condition")
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName}, gateway)
-				if err != nil {
-					return false
-				}
-				for _, cond := range gateway.Status.Conditions {
-					if cond.Type == gatewayv1alpha1.ConditionTypeIngressClassReady && cond.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, timeout, interval).Should(BeTrue())
-		})
-
-		It("should create ConfigMap in the secret namespace", func() {
-			By("Creating a VPSGateway")
-			gateway := &gatewayv1alpha1.VPSGateway{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: vpsGatewayName,
-				},
-				Spec: gatewayv1alpha1.VPSGatewaySpec{
-					VPS: gatewayv1alpha1.VPSConfig{
-						Address: vpsAddress,
-					},
-					FRP: gatewayv1alpha1.FRPConfig{
-						Port: 7000,
-						TokenSecretRef: gatewayv1alpha1.SecretReference{
-							Name:      secretName,
-							Namespace: secretNamespace,
-							Key:       "token",
-						},
-					},
-					Ingress: gatewayv1alpha1.IngressConfig{
-						Enabled: true,
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, gateway)).Should(Succeed())
-
-			By("Checking if ConfigMap is created")
+			By("Checking if ConfigMap is created in the same namespace")
 			configMap := &corev1.ConfigMap{}
 			configMapName := "frpc-config-" + vpsGatewayName
 			Eventually(func() error {
@@ -177,6 +113,11 @@ var _ = Describe("VPSGateway Controller", func() {
 			Expect(configMap.Data).To(HaveKey("frpc.toml"))
 			Expect(configMap.Data["frpc.toml"]).To(ContainSubstring(vpsAddress))
 			Expect(configMap.Data["frpc.toml"]).To(ContainSubstring("serverPort = 7000"))
+
+			By("Checking if ConfigMap has ownerReference to VPSGateway")
+			Expect(configMap.OwnerReferences).To(HaveLen(1))
+			Expect(configMap.OwnerReferences[0].Name).To(Equal(vpsGatewayName))
+			Expect(configMap.OwnerReferences[0].Kind).To(Equal("VPSGateway"))
 		})
 	})
 })

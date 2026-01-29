@@ -409,12 +409,13 @@ stringData:
 		// NOTE: VPSGateway削除は「VPSGateway削除時」Contextでテストするため、
 		// ここでは削除しない。最終的なクリーンアップはManagerのAfterAllで行う。
 
-		It("IngressClassが作成されること", func() {
-			By("creating VPSGateway CR")
+		It("VPSGatewayが作成されること", func() {
+			By("creating VPSGateway CR (namespace-scoped)")
 			vpsGatewayYAML := fmt.Sprintf(`apiVersion: gateway.hmdyt.github.io/v1alpha1
 kind: VPSGateway
 metadata:
   name: %s
+  namespace: %s
 spec:
   vps:
     address: "%s"
@@ -425,27 +426,19 @@ spec:
       namespace: %s
   ingress:
     enabled: true
+    ingressClassName: vps-gateway-%s
     tls:
       enabled: true
       issuer: "letsencrypt-prod"
     dns:
       enabled: true
       ttl: 300
-`, testVPSGatewayName, mockFRPSAddress, testSecretName, testNamespace)
+`, testVPSGatewayName, testNamespace, mockFRPSAddress, testSecretName, testNamespace, testVPSGatewayName)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(vpsGatewayYAML)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying IngressClass is created")
-			expectedIngressClassName := fmt.Sprintf("vps-gateway-%s", testVPSGatewayName)
-			verifyIngressClass := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "ingressclass", expectedIngressClassName)
-				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "IngressClass should exist")
-			}
-			Eventually(verifyIngressClass).Should(Succeed())
 		})
 
 		It("指定されたnamespaceにfrpc ConfigMapが作成されること", func() {
@@ -462,7 +455,7 @@ spec:
 		It("VPSGatewayのstatusがReadyになること", func() {
 			By("verifying VPSGateway status phase is Ready")
 			verifyStatus := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "vpsgateway", testVPSGatewayName,
+				cmd := exec.Command("kubectl", "get", "vpsgateway", testVPSGatewayName, "-n", testNamespace,
 					"-o", "jsonpath={.status.phase}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -470,10 +463,24 @@ spec:
 			}
 			Eventually(verifyStatus).Should(Succeed())
 		})
+
+		It("子リソースにownerReferenceが設定されていること", func() {
+			By("verifying ConfigMap has ownerReference")
+			expectedConfigMapName := fmt.Sprintf("frpc-config-%s", testVPSGatewayName)
+			verifyOwnerReference := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", expectedConfigMapName, "-n", testNamespace,
+					"-o", "jsonpath={.metadata.ownerReferences[0].name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(testVPSGatewayName), "ConfigMap should have ownerReference to VPSGateway")
+			}
+			Eventually(verifyOwnerReference).Should(Succeed())
+		})
 	})
 
 	Context("vps-gateway classのIngress作成時", Ordered, func() {
 		It("DNSEndpointが作成されること", func() {
+			ingressClassName := fmt.Sprintf("vps-gateway-%s", testVPSGatewayName)
 			By("creating Ingress with vps-gateway IngressClass")
 			ingressYAML := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -481,7 +488,7 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  ingressClassName: vps-gateway-%s
+  ingressClassName: %s
   rules:
     - host: %s
       http:
@@ -493,7 +500,7 @@ spec:
                 name: test-service
                 port:
                   number: 80
-`, testIngressName, testNamespace, testVPSGatewayName, testDomain)
+`, testIngressName, testNamespace, ingressClassName, testDomain)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(ingressYAML)
@@ -560,6 +567,7 @@ spec:
 			multiHostIngressName := "e2e-multi-host-ingress"
 			host1 := "api.e2e-test.example.com"
 			host2 := "web.e2e-test.example.com"
+			ingressClassName := fmt.Sprintf("vps-gateway-%s", testVPSGatewayName)
 
 			By("creating Ingress with multiple hosts")
 			ingressYAML := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
@@ -568,7 +576,7 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  ingressClassName: vps-gateway-%s
+  ingressClassName: %s
   rules:
     - host: %s
       http:
@@ -590,7 +598,7 @@ spec:
                 name: web-service
                 port:
                   number: 3000
-`, multiHostIngressName, testNamespace, testVPSGatewayName, host1, host2)
+`, multiHostIngressName, testNamespace, ingressClassName, host1, host2)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(ingressYAML)
@@ -644,20 +652,21 @@ spec:
 	})
 
 	Context("VPSGateway削除時", func() {
-		It("IngressClassが削除されること", func() {
+		It("子リソースが自動削除されること", func() {
+			expectedConfigMapName := fmt.Sprintf("frpc-config-%s", testVPSGatewayName)
+
 			By("deleting VPSGateway")
-			cmd := exec.Command("kubectl", "delete", "vpsgateway", testVPSGatewayName)
+			cmd := exec.Command("kubectl", "delete", "vpsgateway", testVPSGatewayName, "-n", testNamespace)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying IngressClass is deleted")
-			expectedIngressClassName := fmt.Sprintf("vps-gateway-%s", testVPSGatewayName)
-			verifyIngressClassDeleted := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "ingressclass", expectedIngressClassName)
+			By("verifying ConfigMap is deleted (via ownerReference garbage collection)")
+			verifyConfigMapDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", expectedConfigMapName, "-n", testNamespace)
 				_, err := utils.Run(cmd)
-				g.Expect(err).To(HaveOccurred(), "IngressClass should be deleted")
+				g.Expect(err).To(HaveOccurred(), "ConfigMap should be deleted")
 			}
-			Eventually(verifyIngressClassDeleted).Should(Succeed())
+			Eventually(verifyConfigMapDeleted).Should(Succeed())
 		})
 	})
 
@@ -681,9 +690,9 @@ stringData:
 
 		AfterAll(func() {
 			By("cleaning up edge case VPSGateway resources")
-			cmd := exec.Command("kubectl", "delete", "vpsgateway", "e2e-dns-disabled", "--ignore-not-found")
+			cmd := exec.Command("kubectl", "delete", "vpsgateway", "e2e-dns-disabled", "-n", testNamespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "vpsgateway", "e2e-tls-disabled", "--ignore-not-found")
+			cmd = exec.Command("kubectl", "delete", "vpsgateway", "e2e-tls-disabled", "-n", testNamespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "delete", "ingress", "e2e-edge-ingress", "-n", testNamespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
@@ -695,11 +704,13 @@ stringData:
 
 		It("VPSGatewayでDNSが無効の場合、DNSEndpointが作成されないこと", func() {
 			vpsGatewayName := "e2e-dns-disabled"
+			ingressClassName := fmt.Sprintf("vps-gateway-%s", vpsGatewayName)
 			By("creating VPSGateway with DNS disabled")
 			vpsGatewayYAML := fmt.Sprintf(`apiVersion: gateway.hmdyt.github.io/v1alpha1
 kind: VPSGateway
 metadata:
   name: %s
+  namespace: %s
 spec:
   vps:
     address: "%s"
@@ -710,11 +721,12 @@ spec:
       namespace: %s
   ingress:
     enabled: true
+    ingressClassName: %s
     tls:
       enabled: true
     dns:
       enabled: false
-`, vpsGatewayName, mockFRPSAddress, testSecretName, testNamespace)
+`, vpsGatewayName, testNamespace, mockFRPSAddress, testSecretName, testNamespace, ingressClassName)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(vpsGatewayYAML)
@@ -723,7 +735,7 @@ spec:
 
 			By("waiting for VPSGateway to be ready")
 			verifyReady := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "vpsgateway", vpsGatewayName,
+				cmd := exec.Command("kubectl", "get", "vpsgateway", vpsGatewayName, "-n", testNamespace,
 					"-o", "jsonpath={.status.phase}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -739,7 +751,7 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  ingressClassName: vps-gateway-%s
+  ingressClassName: %s
   rules:
     - host: dns-disabled.example.com
       http:
@@ -751,7 +763,7 @@ spec:
                 name: test-service
                 port:
                   number: 80
-`, ingressName, testNamespace, vpsGatewayName)
+`, ingressName, testNamespace, ingressClassName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(ingressYAML)
@@ -770,17 +782,19 @@ spec:
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "ingress", ingressName, "-n", testNamespace)
 			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "vpsgateway", vpsGatewayName)
+			cmd = exec.Command("kubectl", "delete", "vpsgateway", vpsGatewayName, "-n", testNamespace)
 			_, _ = utils.Run(cmd)
 		})
 
 		It("VPSGatewayでTLSが無効の場合、Certificateが作成されないこと", func() {
 			vpsGatewayName := "e2e-tls-disabled"
+			ingressClassName := fmt.Sprintf("vps-gateway-%s", vpsGatewayName)
 			By("creating VPSGateway with TLS disabled")
 			vpsGatewayYAML := fmt.Sprintf(`apiVersion: gateway.hmdyt.github.io/v1alpha1
 kind: VPSGateway
 metadata:
   name: %s
+  namespace: %s
 spec:
   vps:
     address: "%s"
@@ -791,11 +805,12 @@ spec:
       namespace: %s
   ingress:
     enabled: true
+    ingressClassName: %s
     tls:
       enabled: false
     dns:
       enabled: true
-`, vpsGatewayName, mockFRPSAddress, testSecretName, testNamespace)
+`, vpsGatewayName, testNamespace, mockFRPSAddress, testSecretName, testNamespace, ingressClassName)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(vpsGatewayYAML)
@@ -804,7 +819,7 @@ spec:
 
 			By("waiting for VPSGateway to be ready")
 			verifyReady := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "vpsgateway", vpsGatewayName,
+				cmd := exec.Command("kubectl", "get", "vpsgateway", vpsGatewayName, "-n", testNamespace,
 					"-o", "jsonpath={.status.phase}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -820,7 +835,7 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  ingressClassName: vps-gateway-%s
+  ingressClassName: %s
   rules:
     - host: tls-disabled.example.com
       http:
@@ -832,7 +847,7 @@ spec:
                 name: test-service
                 port:
                   number: 80
-`, ingressName, testNamespace, vpsGatewayName)
+`, ingressName, testNamespace, ingressClassName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(ingressYAML)
@@ -851,7 +866,7 @@ spec:
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "ingress", ingressName, "-n", testNamespace)
 			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "vpsgateway", vpsGatewayName)
+			cmd = exec.Command("kubectl", "delete", "vpsgateway", vpsGatewayName, "-n", testNamespace)
 			_, _ = utils.Run(cmd)
 		})
 
@@ -905,6 +920,8 @@ spec:
 	})
 
 	Context("トラフィックフロー", Ordered, func() {
+		trafficIngressClassName := fmt.Sprintf("vps-gateway-%s", trafficTestGatewayName)
+
 		BeforeAll(func() {
 			By("FRPトークン用のSecretを作成")
 			secretYAML := fmt.Sprintf(`apiVersion: v1
@@ -926,6 +943,7 @@ stringData:
 kind: VPSGateway
 metadata:
   name: %s
+  namespace: %s
 spec:
   vps:
     address: "%s"
@@ -936,11 +954,12 @@ spec:
       namespace: %s
   ingress:
     enabled: true
+    ingressClassName: %s
     tls:
       enabled: false
     dns:
       enabled: false
-`, trafficTestGatewayName, mockFRPSAddress, testSecretName, testNamespace)
+`, trafficTestGatewayName, testNamespace, mockFRPSAddress, testSecretName, testNamespace, trafficIngressClassName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(vpsGatewayYAML)
@@ -949,7 +968,7 @@ spec:
 
 			By("VPSGatewayがReadyになるまで待機")
 			verifyReady := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "vpsgateway", trafficTestGatewayName,
+				cmd := exec.Command("kubectl", "get", "vpsgateway", trafficTestGatewayName, "-n", testNamespace,
 					"-o", "jsonpath={.status.phase}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -1008,7 +1027,7 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  ingressClassName: vps-gateway-%s
+  ingressClassName: %s
   rules:
     - host: %s
       http:
@@ -1020,7 +1039,7 @@ spec:
                 name: %s
                 port:
                   number: 80
-`, trafficTestIngressName, testNamespace, trafficTestGatewayName, trafficTestDomain, trafficTestBackendName)
+`, trafficTestIngressName, testNamespace, trafficIngressClassName, trafficTestDomain, trafficTestBackendName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(ingressYAML)
@@ -1094,7 +1113,7 @@ spec:
 			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "delete", "service", trafficTestBackendName, "-n", testNamespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "vpsgateway", trafficTestGatewayName, "--ignore-not-found")
+			cmd = exec.Command("kubectl", "delete", "vpsgateway", trafficTestGatewayName, "-n", testNamespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "delete", "secret", fmt.Sprintf("%s-traffic", testSecretName), "-n", testNamespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)

@@ -82,10 +82,9 @@ type SecretReference struct {
 	// +kubebuilder:default="token"
 	Key string `json:"key,omitempty"`
 
-	// Namespace of the secret (required for Cluster-scoped VPSGateway)
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Namespace string `json:"namespace"`
+	// Namespace of the secret (optional, defaults to VPSGateway's namespace)
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // IngressControllerConfig defines the Ingress Controller configuration
@@ -278,7 +277,7 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster,shortName=vpsgw,categories=gateway
+// +kubebuilder:resource:scope=Namespaced,shortName=vpsgw,categories=gateway
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="FRPC Ready",type=boolean,JSONPath=`.status.frpcReady`
 // +kubebuilder:printcolumn:name="VPS Address",type=string,JSONPath=`.spec.vps.address`

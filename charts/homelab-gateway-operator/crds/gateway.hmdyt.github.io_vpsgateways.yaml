@@ -16,7 +16,7 @@ spec:
     shortNames:
     - vpsgw
     singular: vpsgateway
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.phase
@@ -107,13 +107,11 @@ spec:
                         minLength: 1
                         type: string
                       namespace:
-                        description: Namespace of the secret (required for Cluster-scoped
-                          VPSGateway)
-                        minLength: 1
+                        description: Namespace of the secret (optional, defaults to
+                          VPSGateway's namespace)
                         type: string
                     required:
                     - name
-                    - namespace
                     type: object
                 required:
                 - tokenSecretRef

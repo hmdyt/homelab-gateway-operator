@@ -26,7 +26,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -95,13 +94,10 @@ func (r *VPSGatewayReconciler) getTraefikServiceAddress(gateway *gatewayv1alpha1
 		r.getResourceNamespace(gateway))
 }
 
-// getResourceNamespace returns the namespace for deploying frpc resources
+// getResourceNamespace returns the namespace for deploying resources
+// Since VPSGateway is namespace-scoped, all child resources are created in the same namespace
 func (r *VPSGatewayReconciler) getResourceNamespace(gateway *gatewayv1alpha1.VPSGateway) string {
-	// Use the namespace from the Secret reference
-	if gateway.Spec.FRP.TokenSecretRef.Namespace != "" {
-		return gateway.Spec.FRP.TokenSecretRef.Namespace
-	}
-	return defaultFrpcNamespace
+	return gateway.Namespace
 }
 
 // SecurityContext helpers
@@ -158,9 +154,8 @@ func (r *VPSGatewayReconciler) reconcileConfigMap(ctx context.Context, gateway *
 		// Set labels
 		configMap.Labels = r.getCommonLabels(gateway)
 
-		// Note: Cannot set OwnerReference for cluster-scoped owner to namespace-scoped resource
-		// The ConfigMap will be cleaned up via finalizer instead
-		return nil
+		// Set owner reference for automatic cleanup
+		return controllerutil.SetControllerReference(gateway, configMap, r.Scheme)
 	})
 
 	if err != nil {
@@ -407,9 +402,8 @@ func (r *VPSGatewayReconciler) reconcileDeployment(ctx context.Context, gateway 
 			},
 		}
 
-		// Note: Cannot set OwnerReference for cluster-scoped owner to namespace-scoped resource
-		// The Deployment will be cleaned up via finalizer instead
-		return nil
+		// Set owner reference for automatic cleanup
+		return controllerutil.SetControllerReference(gateway, deployment, r.Scheme)
 	})
 
 	if err != nil {
@@ -513,8 +507,8 @@ func (r *VPSGatewayReconciler) reconcileService(ctx context.Context, gateway *ga
 			},
 		}
 
-		// Note: Cannot set OwnerReference for cluster-scoped owner to namespace-scoped resource
-		return nil
+		// Set owner reference for automatic cleanup
+		return controllerutil.SetControllerReference(gateway, service, r.Scheme)
 	})
 
 	if err != nil {
@@ -594,76 +588,6 @@ func (r *VPSGatewayReconciler) getConfigMapHash(ctx context.Context, gateway *ga
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// reconcileIngressClass creates or updates the IngressClass for this VPSGateway
-func (r *VPSGatewayReconciler) reconcileIngressClass(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
-	logger := log.FromContext(ctx)
-
-	ingressClassName := r.getIngressClassName(gateway)
-	ingressClass := &networkingv1.IngressClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: ingressClassName,
-		},
-	}
-
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, ingressClass, func() error {
-		// Set labels
-		ingressClass.Labels = map[string]string{
-			"app.kubernetes.io/managed-by":  "homelab-gateway-operator",
-			"app.kubernetes.io/instance":    gateway.Name,
-			"gateway.hmdyt.github.io/owner": gateway.Name,
-		}
-
-		// Set the controller to Traefik's ingress controller
-		// Traefik will watch Ingresses with this IngressClass
-		ingressClass.Spec.Controller = "traefik.io/ingress-controller"
-
-		// Set annotations with VPS address for reference
-		if ingressClass.Annotations == nil {
-			ingressClass.Annotations = make(map[string]string)
-		}
-		ingressClass.Annotations["gateway.hmdyt.github.io/vps-address"] = gateway.Spec.VPS.Address
-
-		// Set owner reference (both are cluster-scoped, so this works)
-		return controllerutil.SetControllerReference(gateway, ingressClass, r.Scheme)
-	})
-
-	if err != nil {
-		logger.Error(err, "Failed to reconcile IngressClass")
-		return err
-	}
-
-	switch op {
-	case controllerutil.OperationResultCreated:
-		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonIngressClassCreated,
-			fmt.Sprintf("IngressClass %s created", ingressClass.Name))
-		logger.Info("IngressClass created", "name", ingressClass.Name)
-	case controllerutil.OperationResultUpdated:
-		r.Recorder.Event(gateway, corev1.EventTypeNormal, EventReasonIngressClassUpdated,
-			fmt.Sprintf("IngressClass %s updated", ingressClass.Name))
-		logger.Info("IngressClass updated", "name", ingressClass.Name)
-	}
-
-	return nil
-}
-
-// deleteIngressClassIfExists deletes the IngressClass if it exists
-func (r *VPSGatewayReconciler) deleteIngressClassIfExists(ctx context.Context, gateway *gatewayv1alpha1.VPSGateway) error {
-	ingressClass := &networkingv1.IngressClass{}
-	ingressClassName := types.NamespacedName{
-		Name: r.getIngressClassName(gateway),
-	}
-
-	err := r.Get(ctx, ingressClassName, ingressClass)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-
-	return r.Delete(ctx, ingressClass)
 }
 
 // getTraefikImage returns the Traefik image from spec or default
@@ -792,7 +716,8 @@ func (r *VPSGatewayReconciler) reconcileTraefikConfigMap(ctx context.Context, ga
 		// Set labels
 		configMap.Labels = r.getTraefikLabels(gateway)
 
-		return nil
+		// Set owner reference for automatic cleanup
+		return controllerutil.SetControllerReference(gateway, configMap, r.Scheme)
 	})
 
 	if err != nil {
@@ -967,7 +892,8 @@ func (r *VPSGatewayReconciler) reconcileTraefikDeployment(ctx context.Context, g
 			},
 		}
 
-		return nil
+		// Set owner reference for automatic cleanup
+		return controllerutil.SetControllerReference(gateway, deployment, r.Scheme)
 	})
 
 	if err != nil {
@@ -1029,7 +955,8 @@ func (r *VPSGatewayReconciler) reconcileTraefikService(ctx context.Context, gate
 			},
 		}
 
-		return nil
+		// Set owner reference for automatic cleanup
+		return controllerutil.SetControllerReference(gateway, service, r.Scheme)
 	})
 
 	if err != nil {
@@ -1065,7 +992,9 @@ func (r *VPSGatewayReconciler) reconcileTraefikServiceAccount(ctx context.Contex
 
 	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
 		sa.Labels = r.getTraefikLabels(gateway)
-		return nil
+
+		// Set owner reference for automatic cleanup
+		return controllerutil.SetControllerReference(gateway, sa, r.Scheme)
 	})
 
 	if err != nil {

@@ -66,10 +66,11 @@ var _ = Describe("Ingress Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, secret)).Should(Succeed())
 
-			// Create the VPSGateway
+			// Create the VPSGateway (namespace-scoped)
 			gateway := &gatewayv1alpha1.VPSGateway{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: vpsGatewayName,
+					Name:      vpsGatewayName,
+					Namespace: secretNamespace,
 				},
 				Spec: gatewayv1alpha1.VPSGatewaySpec{
 					VPS: gatewayv1alpha1.VPSConfig{
@@ -84,7 +85,8 @@ var _ = Describe("Ingress Controller", func() {
 						},
 					},
 					Ingress: gatewayv1alpha1.IngressConfig{
-						Enabled: true,
+						Enabled:          true,
+						IngressClassName: ingressClassName,
 						TLS: gatewayv1alpha1.IngressTLSConfig{
 							Enabled: true,
 							Issuer:  "letsencrypt-prod",
@@ -98,11 +100,12 @@ var _ = Describe("Ingress Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, gateway)).Should(Succeed())
 
-			// Wait for IngressClass to be created
-			Eventually(func() error {
-				ingressClass := &networkingv1.IngressClass{}
-				return k8sClient.Get(ctx, types.NamespacedName{Name: ingressClassName}, ingressClass)
-			}, timeout, interval).Should(Succeed())
+			// Wait for VPSGateway to be ready (no IngressClass is created by operator anymore)
+			Eventually(func() bool {
+				gw := &gatewayv1alpha1.VPSGateway{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName, Namespace: secretNamespace}, gw)
+				return err == nil
+			}, timeout, interval).Should(BeTrue())
 		})
 
 		AfterEach(func() {
@@ -113,9 +116,9 @@ var _ = Describe("Ingress Controller", func() {
 				Expect(k8sClient.Delete(ctx, ingress)).Should(Succeed())
 			}
 
-			// Clean up VPSGateway
+			// Clean up VPSGateway (namespace-scoped)
 			gateway := &gatewayv1alpha1.VPSGateway{}
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName}, gateway)
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName, Namespace: secretNamespace}, gateway)
 			if err == nil {
 				Expect(k8sClient.Delete(ctx, gateway)).Should(Succeed())
 			}
@@ -282,7 +285,7 @@ var _ = Describe("Ingress Controller", func() {
 			By("Checking VPSGateway status.watchedIngresses")
 			gateway := &gatewayv1alpha1.VPSGateway{}
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName}, gateway)
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: vpsGatewayName, Namespace: secretNamespace}, gateway)
 				if err != nil {
 					return false
 				}

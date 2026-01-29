@@ -67,7 +67,6 @@ type IngressReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=externaldns.k8s.io,resources=dnsendpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
 
@@ -99,16 +98,15 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Find the corresponding VPSGateway
-	vpsGatewayName := strings.TrimPrefix(ingressClassName, IngressClassPrefix)
-	gateway := &gatewayv1alpha1.VPSGateway{}
-	if err := r.Get(ctx, types.NamespacedName{Name: vpsGatewayName}, gateway); err != nil {
-		if apierrors.IsNotFound(err) {
-			logger.Info("VPSGateway not found for IngressClass", "vpsGatewayName", vpsGatewayName)
-			return ctrl.Result{}, nil
-		}
-		logger.Error(err, "Failed to get VPSGateway")
+	// 3. Find the corresponding VPSGateway (across all namespaces)
+	gateway, err := r.findVPSGatewayByIngressClassName(ctx, ingressClassName)
+	if err != nil {
+		logger.Error(err, "Failed to find VPSGateway")
 		return ctrl.Result{}, err
+	}
+	if gateway == nil {
+		logger.Info("VPSGateway not found for IngressClass", "ingressClassName", ingressClassName)
+		return ctrl.Result{}, nil
 	}
 
 	// 4. Handle deletion
@@ -392,6 +390,24 @@ func (r *IngressReconciler) findIngressesForVPSGateway(ctx context.Context, obj 
 
 	logger.V(1).Info("Found Ingresses for VPSGateway", "vpsGateway", gateway.Name, "count", len(requests))
 	return requests
+}
+
+// findVPSGatewayByIngressClassName searches for a VPSGateway across all namespaces
+// that matches the given IngressClass name
+func (r *IngressReconciler) findVPSGatewayByIngressClassName(ctx context.Context, ingressClassName string) (*gatewayv1alpha1.VPSGateway, error) {
+	gatewayList := &gatewayv1alpha1.VPSGatewayList{}
+	if err := r.List(ctx, gatewayList); err != nil {
+		return nil, err
+	}
+
+	for i := range gatewayList.Items {
+		gw := &gatewayList.Items[i]
+		if getIngressClassName(gw) == ingressClassName {
+			return gw, nil
+		}
+	}
+
+	return nil, nil
 }
 
 // getIngressClassName returns the IngressClass name for a VPSGateway
